@@ -1330,6 +1330,8 @@ impl UiEngine {
             Line::from("Ctrl-T: Open theme editor"),
             Line::from("Ctrl-Y: Open keymap editor"),
             Line::from("Ctrl-X: Close focused buffer (with confirmation)"),
+            Line::from("Ctrl-B: Toggle left sidebar (servers/buffers)"),
+            Line::from("Ctrl-R: Toggle right sidebar (nicklist)"),
             Line::from("Alt-Left / Alt-Right: Cycle buffers"),
             Line::from("Ctrl-A / Ctrl-E: Start/end of input"),
             Line::from("Ctrl-K / Ctrl-U / Ctrl-W: Kill operations"),
