@@ -99,6 +99,7 @@ pub struct UiEngine {
     palette: PaletteEngine,
     theme_editor: SelectionEditor,
     keymap_editor: SelectionEditor,
+    help_open: bool,
     last_draw: Instant,
     idle_hz: u8,
 }
@@ -125,6 +126,7 @@ impl UiEngine {
             palette: PaletteEngine::new(palette_items),
             theme_editor: SelectionEditor::with_options(theme_options, active_theme),
             keymap_editor: SelectionEditor::with_options(keymap_options, active_keymap),
+            help_open: false,
             last_draw: Instant::now(),
             idle_hz,
         }
@@ -184,6 +186,7 @@ impl UiEngine {
 
     pub fn draw(&mut self, frame: &mut Frame, vm: &AppViewModel) {
         self.last_draw = Instant::now();
+        self.help_open = vm.help_open;
 
         let area = frame.area();
         let root = Layout::default()
@@ -348,6 +351,25 @@ impl UiEngine {
             return Vec::new();
         }
 
+        if self.help_open {
+            match key.code {
+                KeyCode::Esc => {
+                    return vec![UiIntent::Event(UiEvent::Action("help.close".to_owned()))];
+                }
+                KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                    return vec![UiIntent::Event(UiEvent::Action("help.close".to_owned()))];
+                }
+                _ => {
+                    if let Some(action) = self.lookup_action(key)
+                        && action == "help.toggle"
+                    {
+                        return self.handle_action(&action);
+                    }
+                    return Vec::new();
+                }
+            }
+        }
+
         if self.palette_open {
             return self.handle_palette_key(key);
         }
@@ -499,6 +521,7 @@ impl UiEngine {
                 self.keymap_editor.open = false;
                 vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
             }
+            "help.toggle" => vec![UiIntent::Event(UiEvent::Action(action.to_owned()))],
             "theme.editor.toggle" => {
                 self.theme_editor.open = !self.theme_editor.open;
                 self.keymap_editor.open = false;
@@ -553,7 +576,9 @@ impl UiEngine {
         let lines = vec![
             Line::from("TIRC Help"),
             Line::from(""),
+            Line::from("Dismiss: Esc, q, or Ctrl-H"),
             Line::from("Ctrl-P: Open command palette"),
+            Line::from("Ctrl-H: Toggle help"),
             Line::from("Ctrl-T: Open theme editor"),
             Line::from("Ctrl-Y: Open keymap editor"),
             Line::from("Alt-Left / Alt-Right: Cycle buffers"),
@@ -686,7 +711,6 @@ fn flatten_keymap(keymap: &Keymap) -> HashMap<String, String> {
         .iter()
         .chain(keymap.input.iter())
         .chain(keymap.buffer.iter())
-        .chain(keymap.palette.iter())
     {
         map.insert(binding.key.to_ascii_lowercase(), binding.action.clone());
     }

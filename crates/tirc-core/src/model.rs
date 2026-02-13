@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,8 @@ pub struct AppState {
     pub help_open: bool,
     pub palette: PaletteState,
     pub max_scrollback_lines: usize,
+    #[serde(skip)]
+    status_locked_until: Option<DateTime<Utc>>,
 }
 
 impl AppState {
@@ -125,6 +128,23 @@ impl AppState {
             help_open: false,
             palette: PaletteState::default(),
             max_scrollback_lines,
+            status_locked_until: None,
+        }
+    }
+
+    /// Set status text unless a temporary status lock is active.
+    pub fn set_status(&mut self, value: impl Into<String>) {
+        if self.is_status_locked() {
+            return;
+        }
+        self.status = value.into();
+    }
+
+    /// Set status text and prevent overwrite for at least `duration`.
+    pub fn set_status_for(&mut self, value: impl Into<String>, duration: Duration) {
+        self.status = value.into();
+        if let Ok(delta) = chrono::Duration::from_std(duration) {
+            self.status_locked_until = Some(Utc::now() + delta);
         }
     }
 
@@ -153,8 +173,8 @@ impl AppState {
         match event {
             AppEvent::Network(network) => self.apply_network_event(network),
             AppEvent::Ui(ui) => self.apply_ui_event(ui),
-            AppEvent::Command(command) => self.status = format!("Command: {command:?}"),
-            AppEvent::Timer(timer) => self.status = format!("Timer: {timer:?}"),
+            AppEvent::Command(_) => {}
+            AppEvent::Timer(_) => {}
         }
     }
 
@@ -175,7 +195,7 @@ impl AppState {
                         s
                     });
                 self.focus.get_or_insert(status_buffer);
-                self.status = format!("Connected to {network}");
+                self.set_status(format!("Connected to {network}"));
             }
             NetworkEvent::Disconnected { network, reason } => {
                 if let Some(state) = self.networks.get_mut(&network) {
@@ -183,7 +203,7 @@ impl AppState {
                     state.reconnect_attempts = state.reconnect_attempts.saturating_add(1);
                     state.last_error = Some(reason.clone());
                 }
-                self.status = format!("Disconnected from {network}: {reason}");
+                self.set_status(format!("Disconnected from {network}: {reason}"));
             }
             NetworkEvent::Joined { network, channel } => {
                 let id = self.ensure_buffer(&network, &channel);
@@ -191,7 +211,7 @@ impl AppState {
                     n.channels.insert(channel.clone());
                 }
                 self.focus = Some(id);
-                self.status = format!("Joined {channel}");
+                self.set_status(format!("Joined {channel}"));
             }
             NetworkEvent::Parted {
                 network,
@@ -201,10 +221,10 @@ impl AppState {
                 if let Some(n) = self.networks.get_mut(&network) {
                     n.channels.remove(&channel);
                 }
-                self.status = format!(
+                self.set_status(format!(
                     "Parted {channel}: {}",
                     reason.unwrap_or_else(|| "-".to_owned())
-                );
+                ));
             }
             NetworkEvent::NickList {
                 network,
@@ -257,25 +277,32 @@ impl AppState {
     fn apply_ui_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::InputChanged(input) => self.input = input,
-            UiEvent::InputSubmitted => {
-                self.status = "Input submitted".to_owned();
-            }
+            UiEvent::InputSubmitted => {}
             UiEvent::Action(action) => match action.as_str() {
                 "app.quit" => self.should_quit = true,
                 "palette.toggle" => self.palette.open = !self.palette.open,
                 "help.toggle" => self.help_open = !self.help_open,
+                "help.close" => self.help_open = false,
                 "buffer.next" => self.cycle_focus(1),
                 "buffer.prev" => self.cycle_focus(-1),
-                _ => self.status = format!("Unknown action: {action}"),
+                "palette.close" => self.palette.open = false,
+                "palette.execute" => {}
+                _ => self.set_status(format!("Unknown action: {action}")),
             },
             UiEvent::PaletteQuery(query) => self.palette.query = query,
-            UiEvent::PaletteExecute(id) => self.status = format!("Palette selected: {id}"),
+            UiEvent::PaletteExecute(_) => {}
             UiEvent::Resize { width, height } => {
-                self.status = format!("Resized to {width}x{height}");
+                self.set_status(format!("Resized to {width}x{height}"))
             }
             UiEvent::Tick => {}
             UiEvent::QuitRequested => self.should_quit = true,
         }
+    }
+
+    fn is_status_locked(&self) -> bool {
+        self.status_locked_until
+            .as_ref()
+            .is_some_and(|deadline| Utc::now() < *deadline)
     }
 
     fn cycle_focus(&mut self, direction: i8) {

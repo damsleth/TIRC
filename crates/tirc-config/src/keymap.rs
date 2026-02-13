@@ -23,6 +23,7 @@ impl Default for Keymap {
         Self {
             global: vec![
                 KeyBinding::new("ctrl-p", "palette.toggle"),
+                KeyBinding::new("ctrl-h", "help.toggle"),
                 KeyBinding::new("ctrl-c", "app.quit"),
                 KeyBinding::new("ctrl-t", "theme.editor.toggle"),
                 KeyBinding::new("ctrl-y", "keymap.editor.toggle"),

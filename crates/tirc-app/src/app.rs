@@ -41,7 +41,25 @@ pub async fn run(cli: Cli) -> Result<()> {
         state
             .warnings
             .push("config contains plaintext secrets; file must remain permission 0600".to_owned());
-        state.status = "Warning: plaintext credentials detected".to_owned();
+        state.set_status_for(
+            "Warning: plaintext credentials detected".to_owned(),
+            Duration::from_secs(4),
+        );
+    }
+
+    if runtime_config.profiles.is_empty() {
+        state.warnings.push(
+            "No IRC profiles configured. Edit ~/.config/tirc/config.toml to add at least one."
+                .to_owned(),
+        );
+        state.set_status_for(
+            "No profiles configured. Add one in ~/.config/tirc/config.toml".to_owned(),
+            Duration::from_secs(6),
+        );
+    } else if runtime_config.profiles.len() == 1 && runtime_config.profiles[0].name == "libera" {
+        state.set_status(
+            "Using starter profile 'libera'. Run /connect libera or edit config.toml".to_owned(),
+        );
     }
 
     let theme = load_theme(&paths.themes_dir, &runtime_config.ui.theme)?;
@@ -86,9 +104,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             .find(|profile| profile.name == *profile_name)
         {
             net_manager.connect_profile(profile.clone()).await?;
-            state.status = format!("Connecting profile: {profile_name}");
+            state.set_status(format!("Connecting profile: {profile_name}"));
         } else {
-            state.status = format!("Profile not found: {profile_name}");
+            state.set_status_for(
+                format!("Profile not found: {profile_name}"),
+                Duration::from_millis(2_000),
+            );
         }
     }
 
@@ -295,9 +316,12 @@ async fn handle_ui_intents(
                     ui.set_theme(theme, name.clone());
                     runtime_config.ui.theme = name.clone();
                     if let Err(err) = save_config(&paths.config_file, runtime_config) {
-                        state.status = format!("failed to persist theme: {err}");
+                        state.set_status_for(
+                            format!("failed to persist theme: {err}"),
+                            Duration::from_millis(2_000),
+                        );
                     } else {
-                        state.status = format!("theme set: {name}");
+                        state.set_status(format!("theme set: {name}"));
                     }
 
                     if let Ok(options) = available_themes(&paths.themes_dir) {
@@ -305,7 +329,10 @@ async fn handle_ui_intents(
                     }
                 }
                 Err(err) => {
-                    state.status = format!("failed to load theme {name}: {err}");
+                    state.set_status_for(
+                        format!("failed to load theme {name}: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             },
             UiIntent::ApplyKeymap(name) => match load_keymap(&paths.keymaps_dir, &name) {
@@ -313,9 +340,12 @@ async fn handle_ui_intents(
                     ui.set_keymap(&keymap, name.clone());
                     runtime_config.keymap.active_map = name.clone();
                     if let Err(err) = save_config(&paths.config_file, runtime_config) {
-                        state.status = format!("failed to persist keymap: {err}");
+                        state.set_status_for(
+                            format!("failed to persist keymap: {err}"),
+                            Duration::from_millis(2_000),
+                        );
                     } else {
-                        state.status = format!("keymap set: {name}");
+                        state.set_status(format!("keymap set: {name}"));
                     }
 
                     if let Ok(options) = available_keymaps(&paths.keymaps_dir) {
@@ -323,7 +353,10 @@ async fn handle_ui_intents(
                     }
                 }
                 Err(err) => {
-                    state.status = format!("failed to load keymap {name}: {err}");
+                    state.set_status_for(
+                        format!("failed to load keymap {name}: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             },
         }
@@ -338,12 +371,15 @@ async fn send_chat_line(
     logging_enabled: bool,
 ) {
     let Some(focus) = state.focus.clone() else {
-        state.status = "No active buffer".to_owned();
+        state.set_status_for("No active buffer".to_owned(), Duration::from_millis(2_000));
         return;
     };
 
     if focus.network == "local" {
-        state.status = "Cannot send without an active network buffer".to_owned();
+        state.set_status_for(
+            "Cannot send without an active network buffer".to_owned(),
+            Duration::from_millis(2_000),
+        );
         return;
     }
 
@@ -353,7 +389,7 @@ async fn send_chat_line(
     };
 
     if let Err(err) = net_manager.send_command(&focus.network, command).await {
-        state.status = format!("send failed: {err}");
+        state.set_status_for(format!("send failed: {err}"), Duration::from_millis(2_000));
         return;
     }
 
@@ -409,7 +445,7 @@ async fn execute_command_line(
 
     for event in output.events {
         if let AppEvent::Command(CommandEvent::Failed { command, error }) = &event {
-            state.status = format!("{command}: {error}");
+            state.set_status_for(format!("{command}: {error}"), Duration::from_millis(2_000));
         }
         state.apply(event);
     }
@@ -421,7 +457,10 @@ async fn execute_command_line(
                     .send_command(&network, NetCommand::Raw(line))
                     .await
                 {
-                    state.status = format!("send failed: {err}");
+                    state.set_status_for(
+                        format!("send failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
             tirc_core::OutboundCommand::Join { network, channel } => {
@@ -429,7 +468,10 @@ async fn execute_command_line(
                     .send_command(&network, NetCommand::Join(channel))
                     .await
                 {
-                    state.status = format!("join failed: {err}");
+                    state.set_status_for(
+                        format!("join failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
             tirc_core::OutboundCommand::Part { network, channel } => {
@@ -437,7 +479,10 @@ async fn execute_command_line(
                     .send_command(&network, NetCommand::Part(channel))
                     .await
                 {
-                    state.status = format!("part failed: {err}");
+                    state.set_status_for(
+                        format!("part failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
             tirc_core::OutboundCommand::Msg {
@@ -449,7 +494,8 @@ async fn execute_command_line(
                     .send_command(&network, NetCommand::Privmsg { target, body })
                     .await
                 {
-                    state.status = format!("msg failed: {err}");
+                    state
+                        .set_status_for(format!("msg failed: {err}"), Duration::from_millis(2_000));
                 }
             }
             tirc_core::OutboundCommand::Nick { network, nick } => {
@@ -457,7 +503,10 @@ async fn execute_command_line(
                     .send_command(&network, NetCommand::Nick(nick))
                     .await
                 {
-                    state.status = format!("nick failed: {err}");
+                    state.set_status_for(
+                        format!("nick failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
             tirc_core::OutboundCommand::Connect { profile } => {
@@ -465,15 +514,24 @@ async fn execute_command_line(
                     profiles.iter().find(|candidate| candidate.name == profile)
                 {
                     if let Err(err) = net_manager.connect_profile(profile_cfg.clone()).await {
-                        state.status = format!("connect failed: {err}");
+                        state.set_status_for(
+                            format!("connect failed: {err}"),
+                            Duration::from_millis(2_000),
+                        );
                     }
                 } else {
-                    state.status = format!("profile not found: {profile}");
+                    state.set_status_for(
+                        format!("profile not found: {profile}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
             tirc_core::OutboundCommand::Disconnect { network } => {
                 if let Err(err) = net_manager.disconnect(&network).await {
-                    state.status = format!("disconnect failed: {err}");
+                    state.set_status_for(
+                        format!("disconnect failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
         }
@@ -488,7 +546,7 @@ fn build_palette_items(
     let mut items = command_registry
         .specs()
         .iter()
-        .map(|spec| format!("cmd {}", spec.id))
+        .map(|spec| spec.id.to_owned())
         .collect::<Vec<_>>();
 
     items.extend(
@@ -510,10 +568,6 @@ fn build_palette_items(
 }
 
 fn palette_to_command_line(selected: &str) -> Option<String> {
-    if let Some(rest) = selected.strip_prefix("cmd ") {
-        return Some(format!("/{rest}"));
-    }
-
     if let Some(rest) = selected.strip_prefix("buffer ") {
         return Some(format!("/buffer {rest}"));
     }
@@ -522,7 +576,7 @@ fn palette_to_command_line(selected: &str) -> Option<String> {
         return Some(format!("/connect {rest}"));
     }
 
-    None
+    Some(format!("/{selected}"))
 }
 
 async fn restore_session(path: &Path, state: &mut tirc_core::AppState) -> Result<()> {
