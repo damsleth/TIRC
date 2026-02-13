@@ -205,3 +205,80 @@ impl InputHistory {
         self.index.is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_history_push_and_navigate() {
+        let mut hist = InputHistory::new(100);
+        hist.push("first".to_string());
+        hist.push("second".to_string());
+        hist.push("third".to_string());
+
+        // Navigate back through history
+        assert_eq!(hist.prev("current"), Some("third"));
+        assert_eq!(hist.prev("current"), Some("second"));
+        assert_eq!(hist.prev("current"), Some("first"));
+        // At oldest, stays there
+        assert_eq!(hist.prev("current"), Some("first"));
+    }
+
+    #[test]
+    fn test_history_navigate_forward() {
+        let mut hist = InputHistory::new(100);
+        hist.push("first".to_string());
+        hist.push("second".to_string());
+
+        // Go back
+        hist.prev("draft");
+        hist.prev("draft");
+        assert_eq!(hist.prev("draft"), Some("first"));
+
+        // Go forward
+        assert_eq!(hist.next(), Some("second"));
+        // Back to draft
+        assert_eq!(hist.next(), Some("draft"));
+        // No more
+        assert_eq!(hist.next(), None);
+    }
+
+    #[test]
+    fn test_history_max_entries() {
+        let mut hist = InputHistory::new(3);
+        hist.push("a".to_string());
+        hist.push("b".to_string());
+        hist.push("c".to_string());
+        hist.push("d".to_string());
+
+        // Only last 3 should be kept
+        assert_eq!(hist.prev("x"), Some("d"));
+        assert_eq!(hist.prev("x"), Some("c"));
+        assert_eq!(hist.prev("x"), Some("b"));
+        assert_eq!(hist.prev("x"), Some("b")); // oldest now
+    }
+
+    #[test]
+    fn test_history_deduplicates_consecutive() {
+        let mut hist = InputHistory::new(100);
+        hist.push("same".to_string());
+        hist.push("same".to_string());
+        hist.push("same".to_string());
+
+        // Should only have one entry
+        assert_eq!(hist.prev("x"), Some("same"));
+        assert_eq!(hist.prev("x"), Some("same")); // at oldest, same entry
+    }
+
+    #[test]
+    fn test_history_ignores_empty() {
+        let mut hist = InputHistory::new(100);
+        hist.push("".to_string());
+        hist.push("real".to_string());
+        hist.push("".to_string());
+
+        assert_eq!(hist.prev("x"), Some("real"));
+        assert_eq!(hist.prev("x"), Some("real")); // only one entry
+    }
+}

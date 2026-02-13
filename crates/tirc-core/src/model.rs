@@ -716,3 +716,114 @@ pub struct ActiveBufferView {
     pub nicklist: Vec<String>,
     pub lines: Vec<Message>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> AppState {
+        AppState::new(100, 10) // 100 scrollback, max 10 channel list entries
+    }
+
+    #[test]
+    fn test_channel_list_cache_bounded() {
+        let mut state = test_state();
+        
+        // Add 15 entries - should only keep 10
+        for i in 0..15 {
+            state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+                network: "test".to_string(),
+                channel: format!("#channel{}", i),
+                users: i as u32,
+                topic: "".to_string(),
+            }));
+        }
+        
+        let entries = state.channel_list_cache.get("test").unwrap();
+        assert_eq!(entries.len(), 10, "Should be bounded to max 10 entries");
+        
+        // First 10 channels should be present
+        assert_eq!(entries[0].channel, "#channel0");
+        assert_eq!(entries[9].channel, "#channel9");
+    }
+
+    #[test]
+    fn test_channel_list_updates_existing() {
+        let mut state = test_state();
+        
+        // Add a channel
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+            network: "test".to_string(),
+            channel: "#rust".to_string(),
+            users: 100,
+            topic: "Old topic".to_string(),
+        }));
+        
+        // Update same channel
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+            network: "test".to_string(),
+            channel: "#rust".to_string(),
+            users: 150,
+            topic: "New topic".to_string(),
+        }));
+        
+        let entries = state.channel_list_cache.get("test").unwrap();
+        assert_eq!(entries.len(), 1, "Should not duplicate");
+        assert_eq!(entries[0].users, 150);
+        assert_eq!(entries[0].topic, "New topic".to_string());
+    }
+
+    #[test]
+    fn test_user_quit_removes_from_nicklist() {
+        let mut state = test_state();
+        
+        // Setup: create network and buffer with users
+        state.networks.insert("test".to_string(), NetworkState::new("test", "irc.test.net"));
+        state.networks.get_mut("test").unwrap().connected = true;
+        
+        let buffer_id = BufferId::new("test", "#channel");
+        let mut buffer = BufferState::new(buffer_id.clone());
+        buffer.nicklist = vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()];
+        state.buffers.insert(buffer_id.clone(), buffer);
+        
+        // User quits
+        state.apply(AppEvent::Network(NetworkEvent::UserQuit {
+            network: "test".to_string(),
+            nick: "bob".to_string(),
+            reason: Some("Goodbye".to_string()),
+            channels: vec!["#channel".to_string()],
+        }));
+        
+        let buffer = state.buffers.get(&buffer_id).unwrap();
+        assert_eq!(buffer.nicklist.len(), 2);
+        assert!(!buffer.nicklist.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn test_kicked_removes_from_nicklist() {
+        let mut state = test_state();
+        
+        // Setup
+        state.networks.insert("test".to_string(), NetworkState::new("test", "irc.test.net"));
+        state.networks.get_mut("test").unwrap().connected = true;
+        
+        let buffer_id = BufferId::new("test", "#channel");
+        let mut buffer = BufferState::new(buffer_id.clone());
+        buffer.nicklist = vec!["alice".to_string(), "bob".to_string()];
+        state.buffers.insert(buffer_id.clone(), buffer);
+        
+        // User kicked
+        state.apply(AppEvent::Network(NetworkEvent::Kicked {
+            network: "test".to_string(),
+            channel: "#channel".to_string(),
+            kicked_nick: "alice".to_string(),
+            by_nick: Some("op".to_string()),
+            reason: Some("rule violation".to_string()),
+            was_self: false,
+        }));
+        
+        let buffer = state.buffers.get(&buffer_id).unwrap();
+        assert_eq!(buffer.nicklist.len(), 1);
+        assert!(!buffer.nicklist.contains(&"alice".to_string()));
+    }
+}
