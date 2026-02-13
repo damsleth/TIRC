@@ -37,6 +37,8 @@ pub enum UiAction {
     ScrollDownPage,
     ScrollUpLine,
     ScrollDownLine,
+    SidebarLeftToggle,
+    SidebarRightToggle,
 }
 
 impl UiAction {
@@ -65,6 +67,8 @@ impl UiAction {
             "scroll.down_page" => Some(Self::ScrollDownPage),
             "scroll.up_line" => Some(Self::ScrollUpLine),
             "scroll.down_line" => Some(Self::ScrollDownLine),
+            "sidebar.left.toggle" => Some(Self::SidebarLeftToggle),
+            "sidebar.right.toggle" => Some(Self::SidebarRightToggle),
             _ => None,
         }
     }

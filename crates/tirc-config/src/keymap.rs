@@ -30,6 +30,8 @@ impl Default for Keymap {
                 KeyBinding::new("ctrl-y", "keymap.editor.toggle"),
                 KeyBinding::new("alt-left", "buffer.prev"),
                 KeyBinding::new("alt-right", "buffer.next"),
+                KeyBinding::new("ctrl-b", "sidebar.left.toggle"),
+                KeyBinding::new("ctrl-shift-b", "sidebar.right.toggle"),
             ],
             input: vec![
                 KeyBinding::new("ctrl-a", "input.home"),

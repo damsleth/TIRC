@@ -151,6 +151,9 @@ pub struct UiEngine {
     last_connected_count: usize,
     last_buffer_count: usize,
     last_channel_list_len: usize,
+    // Sidebar visibility
+    show_left_sidebar: bool,
+    show_right_sidebar: bool,
 }
 
 impl UiEngine {
@@ -202,6 +205,8 @@ impl UiEngine {
             last_connected_count: 0,
             last_buffer_count: 0,
             last_channel_list_len: 0,
+            show_left_sidebar: true,
+            show_right_sidebar: true,
         }
     }
 
@@ -321,19 +326,34 @@ impl UiEngine {
             ])
             .split(area);
 
+        // Build horizontal constraints based on sidebar visibility
+        let mut h_constraints = Vec::new();
+        if self.show_left_sidebar {
+            h_constraints.push(Constraint::Length(28));
+        }
+        h_constraints.push(Constraint::Min(30));
+        if self.show_right_sidebar {
+            h_constraints.push(Constraint::Length(24));
+        }
+
         let top = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(28),
-                Constraint::Min(30),
-                Constraint::Length(24),
-            ])
+            .constraints(h_constraints)
             .split(root[0]);
 
-        let left = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(4)])
-            .split(top[0]);
+        // Calculate indices based on which sidebars are visible
+        let left_area = if self.show_left_sidebar { Some(top[0]) } else { None };
+        let chat_idx = if self.show_left_sidebar { 1 } else { 0 };
+        let chat_area = top[chat_idx];
+        let right_area = if self.show_right_sidebar { Some(top[top.len() - 1]) } else { None };
+
+        // Only create left layout if sidebar is visible
+        let left = left_area.map(|area| {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(7), Constraint::Min(4)])
+                .split(area)
+        });
 
         // Clamp selection indices after potential cache updates
         if self.server_names.is_empty() {
@@ -389,24 +409,28 @@ impl UiEngine {
         if !network_items.is_empty() {
             server_state.select(Some(self.server_selected));
         }
-        frame.render_stateful_widget(
-            List::new(network_items)
-                .highlight_style(focus_style(
-                    &self.theme,
-                    self.focus_pane == FocusPane::Servers,
-                ))
-                .block(
-                    Block::default()
-                        .title("Servers")
-                        .borders(Borders::ALL)
-                        .border_style(border_style(
-                            &self.theme,
-                            self.focus_pane == FocusPane::Servers,
-                        )),
-                ),
-            left[0],
-            &mut server_state,
-        );
+
+        // Render left sidebar if visible
+        if let Some(ref left) = left {
+            frame.render_stateful_widget(
+                List::new(network_items)
+                    .highlight_style(focus_style(
+                        &self.theme,
+                        self.focus_pane == FocusPane::Servers,
+                    ))
+                    .block(
+                        Block::default()
+                            .title("Servers")
+                            .borders(Borders::ALL)
+                            .border_style(border_style(
+                                &self.theme,
+                                self.focus_pane == FocusPane::Servers,
+                            )),
+                    ),
+                left[0],
+                &mut server_state,
+            );
+        }
 
         let buffer_items = vm
             .buffers
@@ -428,24 +452,27 @@ impl UiEngine {
         if !buffer_items.is_empty() {
             buffer_state.select(Some(self.buffer_selected));
         }
-        frame.render_stateful_widget(
-            List::new(buffer_items)
-                .highlight_style(focus_style(
-                    &self.theme,
-                    self.focus_pane == FocusPane::Buffers,
-                ))
-                .block(
-                    Block::default()
-                        .title("Buffers")
-                        .borders(Borders::ALL)
-                        .border_style(border_style(
-                            &self.theme,
-                            self.focus_pane == FocusPane::Buffers,
-                        )),
-                ),
-            left[1],
-            &mut buffer_state,
-        );
+
+        if let Some(ref left) = left {
+            frame.render_stateful_widget(
+                List::new(buffer_items)
+                    .highlight_style(focus_style(
+                        &self.theme,
+                        self.focus_pane == FocusPane::Buffers,
+                    ))
+                    .block(
+                        Block::default()
+                            .title("Buffers")
+                            .borders(Borders::ALL)
+                            .border_style(border_style(
+                                &self.theme,
+                                self.focus_pane == FocusPane::Buffers,
+                            )),
+                    ),
+                left[1],
+                &mut buffer_state,
+            );
+        }
 
         let chat_title = vm
             .active_buffer
@@ -491,7 +518,7 @@ impl UiEngine {
             self.chat_follow_tail = true;
         }
 
-        let viewport_lines = top[1].height.saturating_sub(2).max(1);
+        let viewport_lines = chat_area.height.saturating_sub(2).max(1);
         self.chat_page_step = viewport_lines.saturating_sub(1).max(1);
         self.chat_max_scroll = chat_lines
             .len()
@@ -517,7 +544,7 @@ impl UiEngine {
                 )
                 .scroll((self.chat_scroll, 0))
                 .wrap(Wrap { trim: false }),
-            top[1],
+            chat_area,
         );
 
         let nick_items = vm
@@ -548,24 +575,28 @@ impl UiEngine {
         if !nick_items.is_empty() {
             nick_state.select(Some(self.nick_selected));
         }
-        frame.render_stateful_widget(
-            List::new(nick_items)
-                .highlight_style(focus_style(
-                    &self.theme,
-                    self.focus_pane == FocusPane::Nicklist,
-                ))
-                .block(
-                    Block::default()
-                        .title(format!("Nicklist [{nick_count}]"))
-                        .borders(Borders::ALL)
-                        .border_style(border_style(
-                            &self.theme,
-                            self.focus_pane == FocusPane::Nicklist,
-                        )),
-                ),
-            top[2],
-            &mut nick_state,
-        );
+
+        // Render right sidebar (nicklist) if visible
+        if let Some(right) = right_area {
+            frame.render_stateful_widget(
+                List::new(nick_items)
+                    .highlight_style(focus_style(
+                        &self.theme,
+                        self.focus_pane == FocusPane::Nicklist,
+                    ))
+                    .block(
+                        Block::default()
+                            .title(format!("Nicklist [{nick_count}]"))
+                            .borders(Borders::ALL)
+                            .border_style(border_style(
+                                &self.theme,
+                                self.focus_pane == FocusPane::Nicklist,
+                            )),
+                    ),
+                right,
+                &mut nick_state,
+            );
+        }
 
         let status_style = Style::default()
             .fg(parse_color(&self.theme.palette.background))
@@ -979,6 +1010,14 @@ impl UiEngine {
                 self.scroll_down_lines(1);
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
+            UiAction::SidebarLeftToggle => {
+                self.show_left_sidebar = !self.show_left_sidebar;
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            UiAction::SidebarRightToggle => {
+                self.show_right_sidebar = !self.show_right_sidebar;
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
             // Forward other actions to the app layer
             _ => vec![UiIntent::Event(UiEvent::Action(action))],
         }
@@ -1172,13 +1211,18 @@ impl UiEngine {
     }
 
     fn cycle_focus_pane(&mut self, direction: i8) {
-        let panes = [
-            FocusPane::Servers,
-            FocusPane::Buffers,
-            FocusPane::Chat,
-            FocusPane::Nicklist,
-            FocusPane::Input,
-        ];
+        // Build available panes based on sidebar visibility
+        let mut panes = Vec::new();
+        if self.show_left_sidebar {
+            panes.push(FocusPane::Servers);
+            panes.push(FocusPane::Buffers);
+        }
+        panes.push(FocusPane::Chat);
+        if self.show_right_sidebar {
+            panes.push(FocusPane::Nicklist);
+        }
+        panes.push(FocusPane::Input);
+
         let current = panes
             .iter()
             .position(|pane| pane == &self.focus_pane)

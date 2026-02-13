@@ -607,7 +607,9 @@ impl AppState {
                 | UiAction::ScrollUpPage
                 | UiAction::ScrollDownPage
                 | UiAction::ScrollUpLine
-                | UiAction::ScrollDownLine => {}
+                | UiAction::ScrollDownLine
+                | UiAction::SidebarLeftToggle
+                | UiAction::SidebarRightToggle => {}
             },
             UiEvent::PaletteQuery(query) => self.palette.query = query,
             UiEvent::PaletteExecute(_) => {}
