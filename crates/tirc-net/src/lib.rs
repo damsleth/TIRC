@@ -479,11 +479,13 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                         "ACTION" => {
                             // ACTION is displayed as a message, not auto-replied
                             let action_body = ctcp_arg.unwrap_or("");
-                            let is_private = !target.is_channel_name();
+                            // Strip STATUSMSG prefixes before checking if private
+                            let stripped_target = target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
+                            let is_private = !stripped_target.is_channel_name();
                             let buffer = if is_private {
                                 sender.clone().unwrap_or_else(|| target.clone())
                             } else {
-                                target.clone()
+                                stripped_target.to_owned()
                             };
                             let is_mention = action_body
                                 .to_ascii_lowercase()
@@ -510,11 +512,15 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 return Ok(());
             }
             
-            let is_private = !target.is_channel_name();
+            // Strip STATUSMSG prefixes (@, +, %) first before checking if it's a channel
+            // These indicate voice/halfop/op-only messages but should go to the channel buffer
+            let stripped_target = target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
+            let is_private = !stripped_target.is_channel_name();
+            
             let buffer = if is_private {
                 sender.clone().unwrap_or_else(|| target.clone())
             } else {
-                target.clone()
+                stripped_target.to_owned()
             };
             let is_mention = body
                 .to_ascii_lowercase()
