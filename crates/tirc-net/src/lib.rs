@@ -25,6 +25,12 @@ use tracing::{debug, warn};
 use tirc_config::{SaslMechanism, ServerProfile};
 use tirc_core::NetworkEvent;
 
+/// CTCP delimiter character.
+const CTCP_DELIM: char = '\x01';
+
+/// Version string for CTCP VERSION replies.
+const TIRC_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+
 /// Outbound command sent from app state/commands to a network worker.
 #[derive(Debug, Clone)]
 pub enum NetCommand {
@@ -435,6 +441,75 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
         }
         Command::PRIVMSG(target, body) => {
             let sender = source_nick.clone();
+            
+            // Check for CTCP request (wrapped in \x01)
+            if body.starts_with(CTCP_DELIM) && body.ends_with(CTCP_DELIM) && body.len() > 2 {
+                let ctcp_content = &body[1..body.len()-1];
+                let (ctcp_cmd, ctcp_arg) = ctcp_content
+                    .split_once(' ')
+                    .map(|(c, a)| (c, Some(a)))
+                    .unwrap_or((ctcp_content, None));
+                
+                // Handle known CTCP requests
+                if let Some(nick) = &sender {
+                    match ctcp_cmd.to_ascii_uppercase().as_str() {
+                        "VERSION" => {
+                            let reply = format!("{CTCP_DELIM}VERSION {TIRC_VERSION}{CTCP_DELIM}");
+                            write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
+                        }
+                        "PING" => {
+                            // Echo back the same payload for PING
+                            let payload = ctcp_arg.unwrap_or("");
+                            let reply = format!("{CTCP_DELIM}PING {payload}{CTCP_DELIM}");
+                            write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
+                        }
+                        "TIME" => {
+                            let now = chrono::Local::now().format("%a %b %d %H:%M:%S %Y");
+                            let reply = format!("{CTCP_DELIM}TIME {now}{CTCP_DELIM}");
+                            write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
+                        }
+                        "CLIENTINFO" => {
+                            let reply = format!("{CTCP_DELIM}CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE{CTCP_DELIM}");
+                            write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
+                        }
+                        "SOURCE" => {
+                            let reply = format!("{CTCP_DELIM}SOURCE https://github.com/user/tirc{CTCP_DELIM}");
+                            write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
+                        }
+                        "ACTION" => {
+                            // ACTION is displayed as a message, not auto-replied
+                            let action_body = ctcp_arg.unwrap_or("");
+                            let is_private = !target.is_channel_name();
+                            let buffer = if is_private {
+                                sender.clone().unwrap_or_else(|| target.clone())
+                            } else {
+                                target.clone()
+                            };
+                            let is_mention = action_body
+                                .to_ascii_lowercase()
+                                .contains(&runtime.current_nick.to_ascii_lowercase());
+                            
+                            let _ = events_tx
+                                .send(NetworkEvent::Action {
+                                    network: profile.name.clone(),
+                                    buffer,
+                                    sender,
+                                    body: action_body.to_owned(),
+                                    is_private,
+                                    is_mention,
+                                    ts,
+                                })
+                                .await;
+                        }
+                        _ => {
+                            // Unknown CTCP, ignore
+                            debug!("Received unknown CTCP: {ctcp_cmd}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            
             let is_private = !target.is_channel_name();
             let buffer = if is_private {
                 sender.clone().unwrap_or_else(|| target.clone())

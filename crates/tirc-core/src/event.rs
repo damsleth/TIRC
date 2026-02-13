@@ -117,6 +117,16 @@ pub enum NetworkEvent {
         is_mention: bool,
         ts: DateTime<Utc>,
     },
+    /// CTCP ACTION (/me command)
+    Action {
+        network: String,
+        buffer: String,
+        sender: Option<String>,
+        body: String,
+        is_private: bool,
+        is_mention: bool,
+        ts: DateTime<Utc>,
+    },
     System {
         network: String,
         body: String,

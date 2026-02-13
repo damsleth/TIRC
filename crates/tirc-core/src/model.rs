@@ -344,6 +344,33 @@ impl AppState {
                     },
                 );
             }
+            NetworkEvent::Action {
+                network,
+                buffer,
+                sender,
+                body,
+                is_private: _,
+                is_mention,
+                ts,
+            } => {
+                // Format CTCP ACTION as "* nick action text"
+                let action_body = if let Some(nick) = &sender {
+                    format!("* {nick} {body}")
+                } else {
+                    format!("* {body}")
+                };
+                self.push_message(
+                    &network,
+                    &buffer,
+                    Message {
+                        ts,
+                        sender,
+                        body: action_body,
+                        mention: is_mention,
+                        tags: BTreeMap::new(),
+                    },
+                );
+            }
             NetworkEvent::System { network, body, ts } => {
                 self.push_message(
                     &network,
