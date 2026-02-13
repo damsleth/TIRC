@@ -214,15 +214,15 @@ fn write_default_config(path: &Path) -> Result<(), ConfigError> {
 
 fn sample_profile() -> ServerProfile {
     ServerProfile {
-        name: "libera".to_owned(),
-        host: "irc.libera.chat".to_owned(),
-        port: 6697,
-        tls: true,
+        name: "default".to_owned(),
+        host: "irc.homelien.no".to_owned(),
+        port: 6666,
+        tls: false,
         nick: "tirc_user".to_owned(),
         user: "tirc".to_owned(),
         realname: "TIRC User".to_owned(),
         sasl: None,
-        autojoin: vec!["#rust".to_owned()],
+        autojoin: Vec::new(),
         secret: None,
     }
 }
@@ -253,7 +253,9 @@ mod tests {
         assert!(config_file.exists());
         assert_eq!(loaded.config.ui.theme, "tirc-default");
         assert_eq!(loaded.config.profiles.len(), 1);
-        assert_eq!(loaded.config.profiles[0].name, "libera");
+        assert_eq!(loaded.config.profiles[0].name, "default");
+        assert_eq!(loaded.config.profiles[0].host, "irc.homelien.no");
+        assert_eq!(loaded.config.profiles[0].port, 6666);
     }
 
     #[cfg(unix)]

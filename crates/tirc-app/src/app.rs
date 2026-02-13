@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io, path::Path, time::Duration};
+use std::{collections::BTreeMap, env, io, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -56,9 +56,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             "No profiles configured. Add one in ~/.config/tirc/config.toml".to_owned(),
             Duration::from_secs(6),
         );
-    } else if runtime_config.profiles.len() == 1 && runtime_config.profiles[0].name == "libera" {
+    } else if runtime_config.profiles.len() == 1 && runtime_config.profiles[0].name == "default" {
         state.set_status(
-            "Using starter profile 'libera'. Run /connect libera or edit config.toml".to_owned(),
+            "Using starter profile 'default'. Run /connect default or edit config.toml".to_owned(),
         );
     }
 
@@ -104,7 +104,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             .find(|profile| profile.name == *profile_name)
         {
             net_manager.connect_profile(profile.clone()).await?;
-            state.set_status(format!("Connecting profile: {profile_name}"));
+            state.set_status_for(
+                format!("Connecting profile: {profile_name}"),
+                Duration::from_millis(2_000),
+            );
         } else {
             state.set_status_for(
                 format!("Profile not found: {profile_name}"),
@@ -113,8 +116,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
     }
 
-    if state.focus.is_none() {
+    if state.buffers.is_empty() {
         state.ensure_buffer("local", "status");
+    }
+
+    let focus_missing = match state.focus.as_ref() {
+        Some(buffer_id) => !state.buffers.contains_key(buffer_id),
+        None => true,
+    };
+    if focus_missing {
         state.focus = Some(tirc_core::BufferId::new("local", "status"));
     }
 
@@ -141,7 +151,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let evt = event::read()?;
             let intents = ui.handle_terminal_event(evt);
             if !intents.is_empty() {
-                handle_ui_intents(
+                let open_config_editor = handle_ui_intents(
                     intents,
                     &mut state,
                     &mut ui,
@@ -152,6 +162,28 @@ pub async fn run(cli: Cli) -> Result<()> {
                     &logger,
                 )
                 .await;
+                if open_config_editor {
+                    if let Err(err) = open_config_in_editor(&mut terminal, &paths.config_file) {
+                        state.set_status_for(
+                            format!("failed to open config in editor: {err}"),
+                            Duration::from_millis(2_000),
+                        );
+                    } else {
+                        if let Err(err) =
+                            reload_runtime_config(&paths, &mut runtime_config, &mut ui)
+                        {
+                            state.set_status_for(
+                                format!("failed to reload config: {err}"),
+                                Duration::from_millis(2_000),
+                            );
+                        } else {
+                            state.set_status_for(
+                                "Returned from config editor; configuration reloaded",
+                                Duration::from_millis(2_000),
+                            );
+                        }
+                    }
+                }
                 needs_draw = true;
             }
         }
@@ -268,10 +300,18 @@ async fn handle_ui_intents(
     paths: &AppPaths,
     runtime_config: &mut tirc_config::AppConfig,
     logger: &LogWriter,
-) {
+) -> bool {
+    let mut open_config_editor = false;
+
     for intent in intents {
         match intent {
             UiIntent::Event(UiEvent::PaletteExecute(selected)) => {
+                if selected == "edit config" {
+                    open_config_editor = true;
+                    state.set_status("Opening config in $EDITOR...");
+                    continue;
+                }
+
                 if let Some(line) = palette_to_command_line(&selected) {
                     execute_command_line(
                         &line,
@@ -361,6 +401,8 @@ async fn handle_ui_intents(
             },
         }
     }
+
+    open_config_editor
 }
 
 async fn send_chat_line(
@@ -518,6 +560,37 @@ async fn execute_command_line(
                             format!("connect failed: {err}"),
                             Duration::from_millis(2_000),
                         );
+                    } else {
+                        state
+                            .networks
+                            .entry(profile_cfg.name.clone())
+                            .or_insert_with(|| {
+                                tirc_core::NetworkState::new(
+                                    profile_cfg.name.clone(),
+                                    format!("{}:{}", profile_cfg.host, profile_cfg.port),
+                                )
+                            });
+                        state.push_message(
+                            "local",
+                            "status",
+                            tirc_core::Message {
+                                ts: Utc::now(),
+                                sender: None,
+                                body: format!(
+                                    "Connecting to {}:{} as {}",
+                                    profile_cfg.host, profile_cfg.port, profile_cfg.nick
+                                ),
+                                mention: false,
+                                tags: BTreeMap::new(),
+                            },
+                        );
+                        state.set_status_for(
+                            format!(
+                                "Connecting to {}:{} ({})",
+                                profile_cfg.host, profile_cfg.port, profile_cfg.name
+                            ),
+                            Duration::from_millis(2_000),
+                        );
                     }
                 } else {
                     state.set_status_for(
@@ -561,6 +634,7 @@ fn build_palette_items(
             .iter()
             .map(|profile| format!("connect {}", profile.name)),
     );
+    items.push("edit config".to_owned());
 
     items.sort();
     items.dedup();
@@ -577,6 +651,60 @@ fn palette_to_command_line(selected: &str) -> Option<String> {
     }
 
     Some(format!("/{selected}"))
+}
+
+fn open_config_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    config_path: &Path,
+) -> Result<()> {
+    restore_terminal(terminal)?;
+    let edit_result = run_editor(config_path);
+    setup_terminal_in_place(terminal)?;
+    edit_result
+}
+
+fn reload_runtime_config(
+    paths: &AppPaths,
+    runtime_config: &mut tirc_config::AppConfig,
+    ui: &mut UiEngine,
+) -> Result<()> {
+    let loaded = load_config(paths, Some(&paths.config_file))?;
+    *runtime_config = loaded.config;
+
+    let theme = load_theme(&paths.themes_dir, &runtime_config.ui.theme)?;
+    ui.set_theme(theme, runtime_config.ui.theme.clone());
+
+    let keymap = load_keymap(&paths.keymaps_dir, &runtime_config.keymap.active_map)?;
+    ui.set_keymap(&keymap, runtime_config.keymap.active_map.clone());
+
+    let theme_options = available_themes(&paths.themes_dir)?;
+    ui.set_theme_options(theme_options, runtime_config.ui.theme.clone());
+
+    let keymap_options = available_keymaps(&paths.keymaps_dir)?;
+    ui.set_keymap_options(keymap_options, runtime_config.keymap.active_map.clone());
+
+    Ok(())
+}
+
+fn run_editor(config_path: &Path) -> Result<()> {
+    let editor = env::var("EDITOR").unwrap_or_else(|_| "vi".to_owned());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    let mut command = Command::new(program);
+    command.args(parts);
+    command.arg(config_path);
+
+    let status = command.status().with_context(|| {
+        format!(
+            "spawn editor '{program}' for {}",
+            config_path.to_string_lossy()
+        )
+    })?;
+    if !status.success() {
+        anyhow::bail!("editor exited with status {status}");
+    }
+
+    Ok(())
 }
 
 async fn restore_session(path: &Path, state: &mut tirc_core::AppState) -> Result<()> {
@@ -598,6 +726,17 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+fn setup_terminal_in_place(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+    enable_raw_mode().context("enable raw mode")?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(())
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {

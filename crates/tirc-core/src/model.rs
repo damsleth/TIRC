@@ -196,6 +196,17 @@ impl AppState {
                     });
                 self.focus.get_or_insert(status_buffer);
                 self.set_status(format!("Connected to {network}"));
+                self.push_message(
+                    &network,
+                    "status",
+                    Message {
+                        ts: Utc::now(),
+                        sender: None,
+                        body: format!("Connected to {server}"),
+                        mention: false,
+                        tags: BTreeMap::new(),
+                    },
+                );
             }
             NetworkEvent::Disconnected { network, reason } => {
                 if let Some(state) = self.networks.get_mut(&network) {
@@ -204,6 +215,17 @@ impl AppState {
                     state.last_error = Some(reason.clone());
                 }
                 self.set_status(format!("Disconnected from {network}: {reason}"));
+                self.push_message(
+                    &network,
+                    "status",
+                    Message {
+                        ts: Utc::now(),
+                        sender: None,
+                        body: format!("Disconnected: {reason}"),
+                        mention: false,
+                        tags: BTreeMap::new(),
+                    },
+                );
             }
             NetworkEvent::Joined { network, channel } => {
                 let id = self.ensure_buffer(&network, &channel);
@@ -212,6 +234,17 @@ impl AppState {
                 }
                 self.focus = Some(id);
                 self.set_status(format!("Joined {channel}"));
+                self.push_message(
+                    &network,
+                    "status",
+                    Message {
+                        ts: Utc::now(),
+                        sender: None,
+                        body: format!("Joined {channel}"),
+                        mention: false,
+                        tags: BTreeMap::new(),
+                    },
+                );
             }
             NetworkEvent::Parted {
                 network,
@@ -225,6 +258,17 @@ impl AppState {
                     "Parted {channel}: {}",
                     reason.unwrap_or_else(|| "-".to_owned())
                 ));
+                self.push_message(
+                    &network,
+                    "status",
+                    Message {
+                        ts: Utc::now(),
+                        sender: None,
+                        body: format!("Parted {channel}"),
+                        mention: false,
+                        tags: BTreeMap::new(),
+                    },
+                );
             }
             NetworkEvent::NickList {
                 network,
