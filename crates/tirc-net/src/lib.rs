@@ -1,0 +1,795 @@
+//! Async IRC networking runtime for TIRC.
+
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    time::Duration,
+};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Utc};
+use irc_proto::{
+    Command, Message, Response, chan::ChannelExt, command::CapSubCommand, message::Tag,
+};
+use rand::Rng;
+use thiserror::Error;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, split},
+    net::TcpStream,
+    sync::mpsc,
+    task::JoinHandle,
+    time,
+};
+use tokio_native_tls::TlsConnector;
+use tracing::{debug, warn};
+
+use tirc_config::{SaslMechanism, ServerProfile};
+use tirc_core::NetworkEvent;
+
+/// Outbound command sent from app state/commands to a network worker.
+#[derive(Debug, Clone)]
+pub enum NetCommand {
+    Raw(String),
+    Join(String),
+    Part(String),
+    Privmsg { target: String, body: String },
+    Nick(String),
+    Disconnect,
+}
+
+/// Networking errors.
+#[derive(Debug, Error)]
+pub enum NetError {
+    #[error("network already connected: {0}")]
+    AlreadyConnected(String),
+    #[error("unknown network: {0}")]
+    UnknownNetwork(String),
+    #[error("channel send failed")]
+    ChannelClosed,
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("tls error: {0}")]
+    Tls(#[from] tokio_native_tls::native_tls::Error),
+}
+
+struct ConnectionHandle {
+    tx: mpsc::Sender<NetCommand>,
+    task: JoinHandle<()>,
+}
+
+/// Multi-server manager that owns one task per active connection.
+pub struct NetManager {
+    handles: HashMap<String, ConnectionHandle>,
+    events_tx: mpsc::Sender<NetworkEvent>,
+}
+
+impl NetManager {
+    pub fn new(events_tx: mpsc::Sender<NetworkEvent>) -> Self {
+        Self {
+            handles: HashMap::new(),
+            events_tx,
+        }
+    }
+
+    pub async fn connect_profile(&mut self, profile: ServerProfile) -> Result<(), NetError> {
+        if self.handles.contains_key(&profile.name) {
+            return Err(NetError::AlreadyConnected(profile.name));
+        }
+
+        let network_name = profile.name.clone();
+        let (tx, rx) = mpsc::channel::<NetCommand>(512);
+        let events = self.events_tx.clone();
+
+        let task = tokio::spawn(async move {
+            run_connection_task(profile, rx, events).await;
+        });
+
+        self.handles
+            .insert(network_name, ConnectionHandle { tx, task });
+        Ok(())
+    }
+
+    pub async fn send_command(&self, network: &str, command: NetCommand) -> Result<(), NetError> {
+        let Some(handle) = self.handles.get(network) else {
+            return Err(NetError::UnknownNetwork(network.to_owned()));
+        };
+
+        handle
+            .tx
+            .send(command)
+            .await
+            .map_err(|_| NetError::ChannelClosed)
+    }
+
+    pub async fn disconnect(&mut self, network: &str) -> Result<(), NetError> {
+        let Some(handle) = self.handles.remove(network) else {
+            return Err(NetError::UnknownNetwork(network.to_owned()));
+        };
+
+        let _ = handle.tx.send(NetCommand::Disconnect).await;
+        handle.task.abort();
+        Ok(())
+    }
+
+    pub async fn disconnect_all(&mut self) {
+        let mut handles = HashMap::new();
+        std::mem::swap(&mut self.handles, &mut handles);
+
+        for (_, handle) in handles {
+            let _ = handle.tx.send(NetCommand::Disconnect).await;
+            handle.task.abort();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConnectionRuntime {
+    requested_caps: BTreeSet<String>,
+    acked_caps: BTreeSet<String>,
+    current_nick: String,
+    registration_complete: bool,
+    sasl_in_progress: bool,
+    sasl_done: bool,
+}
+
+impl ConnectionRuntime {
+    fn new(profile: &ServerProfile) -> Self {
+        Self {
+            requested_caps: BTreeSet::new(),
+            acked_caps: BTreeSet::new(),
+            current_nick: profile.nick.clone(),
+            registration_complete: false,
+            sasl_in_progress: false,
+            sasl_done: profile.sasl.is_none(),
+        }
+    }
+}
+
+async fn run_connection_task(
+    profile: ServerProfile,
+    mut command_rx: mpsc::Receiver<NetCommand>,
+    events_tx: mpsc::Sender<NetworkEvent>,
+) {
+    let mut attempt = 0_u32;
+    let mut should_exit = false;
+    let mut joined_channels = profile.autojoin.iter().cloned().collect::<BTreeSet<_>>();
+
+    while !should_exit {
+        match connect_stream(&profile).await {
+            Ok(stream) => {
+                attempt = 0;
+                if events_tx
+                    .send(NetworkEvent::Connected {
+                        network: profile.name.clone(),
+                        server: format!("{}:{}", profile.host, profile.port),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+
+                match run_live_connection(
+                    stream,
+                    &profile,
+                    &mut command_rx,
+                    &events_tx,
+                    &mut joined_channels,
+                )
+                .await
+                {
+                    Ok(ConnectionExit::Requested) => {
+                        should_exit = true;
+                    }
+                    Ok(ConnectionExit::Unexpected(reason)) => {
+                        let _ = events_tx
+                            .send(NetworkEvent::Disconnected {
+                                network: profile.name.clone(),
+                                reason,
+                            })
+                            .await;
+                    }
+                    Err(err) => {
+                        let _ = events_tx
+                            .send(NetworkEvent::Disconnected {
+                                network: profile.name.clone(),
+                                reason: err.to_string(),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = events_tx
+                    .send(NetworkEvent::Disconnected {
+                        network: profile.name.clone(),
+                        reason: format!("connection failed: {err}"),
+                    })
+                    .await;
+            }
+        }
+
+        if should_exit {
+            break;
+        }
+
+        attempt = attempt.saturating_add(1);
+        let delay = reconnect_delay(attempt);
+
+        let sleep = time::sleep(delay);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                _ = &mut sleep => break,
+                maybe_command = command_rx.recv() => {
+                    let Some(command) = maybe_command else {
+                        return;
+                    };
+
+                    if apply_offline_command(&mut joined_channels, command) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn apply_offline_command(joined_channels: &mut BTreeSet<String>, command: NetCommand) -> bool {
+    match command {
+        NetCommand::Disconnect => true,
+        NetCommand::Join(channel) => {
+            joined_channels.insert(channel);
+            false
+        }
+        NetCommand::Part(channel) => {
+            joined_channels.remove(&channel);
+            false
+        }
+        NetCommand::Raw(_) | NetCommand::Privmsg { .. } | NetCommand::Nick(_) => false,
+    }
+}
+
+async fn run_live_connection(
+    stream: DynStream,
+    profile: &ServerProfile,
+    command_rx: &mut mpsc::Receiver<NetCommand>,
+    events_tx: &mpsc::Sender<NetworkEvent>,
+    joined_channels: &mut BTreeSet<String>,
+) -> Result<ConnectionExit, NetError> {
+    let (reader_half, mut writer_half) = split(stream);
+    let mut reader = BufReader::new(reader_half);
+    let mut line = String::new();
+
+    let mut runtime = ConnectionRuntime::new(profile);
+    send_registration(&mut writer_half, profile).await?;
+
+    loop {
+        line.clear();
+        tokio::select! {
+            maybe_command = command_rx.recv() => {
+                let Some(command) = maybe_command else {
+                    return Ok(ConnectionExit::Requested);
+                };
+
+                if handle_command(
+                    command,
+                    &profile.name,
+                    &mut writer_half,
+                    joined_channels,
+                    events_tx,
+                ).await? {
+                    return Ok(ConnectionExit::Requested);
+                }
+            }
+            read = reader.read_line(&mut line) => {
+                let count = read?;
+                if count == 0 {
+                    return Ok(ConnectionExit::Unexpected("connection closed by server".to_owned()));
+                }
+
+                if let Err(err) = handle_server_line(
+                    &line,
+                    profile,
+                    &mut runtime,
+                    &mut writer_half,
+                    events_tx,
+                    joined_channels,
+                ).await {
+                    warn!(network = profile.name, "failed to process incoming line: {err}");
+                }
+            }
+        }
+    }
+}
+
+async fn send_registration<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    profile: &ServerProfile,
+) -> Result<(), NetError> {
+    let cap_ls = Command::CAP(None, CapSubCommand::LS, Some("302".to_owned()), None);
+    write_command(writer, cap_ls).await?;
+    write_command(writer, Command::NICK(profile.nick.clone())).await?;
+    write_command(
+        writer,
+        Command::USER(
+            profile.user.clone(),
+            "0".to_owned(),
+            profile.realname.clone(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn handle_command<W: AsyncWrite + Unpin>(
+    command: NetCommand,
+    network: &str,
+    writer: &mut W,
+    joined_channels: &mut BTreeSet<String>,
+    events_tx: &mpsc::Sender<NetworkEvent>,
+) -> Result<bool, NetError> {
+    match command {
+        NetCommand::Raw(line) => {
+            write_raw_line(writer, &line).await?;
+        }
+        NetCommand::Join(channel) => {
+            joined_channels.insert(channel.clone());
+            write_command(writer, Command::JOIN(channel.clone(), None, None)).await?;
+            let _ = events_tx
+                .send(NetworkEvent::Joined {
+                    network: network.to_owned(),
+                    channel,
+                })
+                .await;
+        }
+        NetCommand::Part(channel) => {
+            joined_channels.remove(&channel);
+            write_command(writer, Command::PART(channel.clone(), None)).await?;
+            let _ = events_tx
+                .send(NetworkEvent::Parted {
+                    network: network.to_owned(),
+                    channel,
+                    reason: Some("manual part".to_owned()),
+                })
+                .await;
+        }
+        NetCommand::Privmsg { target, body } => {
+            write_command(writer, Command::PRIVMSG(target, body)).await?;
+        }
+        NetCommand::Nick(nick) => {
+            write_command(writer, Command::NICK(nick)).await?;
+        }
+        NetCommand::Disconnect => {
+            let _ = write_command(writer, Command::QUIT(Some("leaving".to_owned()))).await;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn handle_server_line<W: AsyncWrite + Unpin>(
+    line: &str,
+    profile: &ServerProfile,
+    runtime: &mut ConnectionRuntime,
+    writer: &mut W,
+    events_tx: &mpsc::Sender<NetworkEvent>,
+    joined_channels: &mut BTreeSet<String>,
+) -> Result<(), NetError> {
+    let message = match line.parse::<Message>() {
+        Ok(message) => message,
+        Err(err) => {
+            debug!(
+                network = profile.name,
+                "could not parse incoming IRC line: {err}"
+            );
+            return Ok(());
+        }
+    };
+
+    let tags = parse_tags(message.tags.clone());
+    let ts = parse_timestamp(&tags).unwrap_or_else(Utc::now);
+
+    let source_nick = message.source_nickname().map(ToOwned::to_owned);
+
+    match message.command {
+        Command::PING(server, token) => {
+            write_command(writer, Command::PONG(server, token)).await?;
+        }
+        Command::PRIVMSG(target, body) => {
+            let sender = source_nick.clone();
+            let is_private = !target.is_channel_name();
+            let buffer = if is_private {
+                sender.clone().unwrap_or_else(|| target.clone())
+            } else {
+                target.clone()
+            };
+            let is_mention = body
+                .to_ascii_lowercase()
+                .contains(&runtime.current_nick.to_ascii_lowercase());
+
+            let _ = events_tx
+                .send(NetworkEvent::Message {
+                    network: profile.name.clone(),
+                    buffer,
+                    sender,
+                    body,
+                    tags,
+                    is_private,
+                    is_mention,
+                    ts,
+                })
+                .await;
+        }
+        Command::NOTICE(target, body) => {
+            let sender = source_nick.clone();
+            let _ = events_tx
+                .send(NetworkEvent::Message {
+                    network: profile.name.clone(),
+                    buffer: if target.is_channel_name() {
+                        target
+                    } else {
+                        "status".to_owned()
+                    },
+                    sender,
+                    body,
+                    tags,
+                    is_private: false,
+                    is_mention: false,
+                    ts,
+                })
+                .await;
+        }
+        Command::JOIN(channel, _, _) => {
+            if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
+                joined_channels.insert(channel.clone());
+                let _ = events_tx
+                    .send(NetworkEvent::Joined {
+                        network: profile.name.clone(),
+                        channel,
+                    })
+                    .await;
+            }
+        }
+        Command::PART(channel, reason) => {
+            if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
+                joined_channels.remove(&channel);
+            }
+            let _ = events_tx
+                .send(NetworkEvent::Parted {
+                    network: profile.name.clone(),
+                    channel,
+                    reason,
+                })
+                .await;
+        }
+        Command::NICK(new_nick) => {
+            if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
+                runtime.current_nick = new_nick.clone();
+            }
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: format!("Nick changed to {new_nick}"),
+                    ts,
+                })
+                .await;
+        }
+        Command::CAP(_, subcommand, _, params) => {
+            handle_cap_message(subcommand, params, profile, runtime, writer, events_tx).await?;
+        }
+        Command::AUTHENTICATE(data) => {
+            if data == "+"
+                && !runtime.sasl_done
+                && runtime.sasl_in_progress
+                && profile
+                    .secret
+                    .as_ref()
+                    .and_then(|secret| secret.sasl_password.clone())
+                    .is_some()
+                && profile.sasl.is_some()
+            {
+                send_sasl_payload(writer, profile).await?;
+            }
+        }
+        Command::Response(response, args) => {
+            handle_response(
+                response,
+                args,
+                profile,
+                runtime,
+                writer,
+                events_tx,
+                joined_channels,
+                ts,
+            )
+            .await?;
+        }
+        Command::Raw(cmd, args) => {
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: format!("{cmd} {}", args.join(" ")),
+                    ts,
+                })
+                .await;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn handle_cap_message<W: AsyncWrite + Unpin>(
+    subcommand: CapSubCommand,
+    params: Option<String>,
+    profile: &ServerProfile,
+    runtime: &mut ConnectionRuntime,
+    writer: &mut W,
+    events_tx: &mpsc::Sender<NetworkEvent>,
+) -> Result<(), NetError> {
+    match subcommand {
+        CapSubCommand::LS | CapSubCommand::NEW => {
+            let advertised = params
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect::<BTreeSet<_>>();
+
+            let mut desired_caps = vec!["server-time", "echo-message", "batch"];
+            if profile.sasl.is_some() {
+                desired_caps.push("sasl");
+            }
+
+            let request = desired_caps
+                .into_iter()
+                .filter(|cap| advertised.contains(*cap))
+                .collect::<Vec<_>>();
+
+            if request.is_empty() {
+                write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
+                return Ok(());
+            }
+
+            let req = request.join(" ");
+            write_command(
+                writer,
+                Command::CAP(None, CapSubCommand::REQ, None, Some(req.clone())),
+            )
+            .await?;
+            runtime
+                .requested_caps
+                .extend(request.into_iter().map(str::to_owned));
+        }
+        CapSubCommand::ACK => {
+            let acked = params
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            runtime.acked_caps.extend(acked.iter().cloned());
+
+            if acked.iter().any(|cap| cap == "sasl") && !runtime.sasl_done && profile.sasl.is_some()
+            {
+                runtime.sasl_in_progress = true;
+                write_command(writer, Command::AUTHENTICATE("PLAIN".to_owned())).await?;
+            } else {
+                write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
+            }
+        }
+        CapSubCommand::NAK => {
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: "server rejected requested capabilities".to_owned(),
+                    ts: Utc::now(),
+                })
+                .await;
+            write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
+        }
+        CapSubCommand::LIST | CapSubCommand::END | CapSubCommand::DEL | CapSubCommand::REQ => {}
+    }
+
+    Ok(())
+}
+
+async fn handle_response<W: AsyncWrite + Unpin>(
+    response: Response,
+    args: Vec<String>,
+    profile: &ServerProfile,
+    runtime: &mut ConnectionRuntime,
+    writer: &mut W,
+    events_tx: &mpsc::Sender<NetworkEvent>,
+    joined_channels: &BTreeSet<String>,
+    ts: DateTime<Utc>,
+) -> Result<(), NetError> {
+    match response {
+        Response::RPL_WELCOME => {
+            runtime.registration_complete = true;
+            for channel in joined_channels {
+                write_command(writer, Command::JOIN(channel.clone(), None, None)).await?;
+            }
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: args.join(" "),
+                    ts,
+                })
+                .await;
+        }
+        Response::RPL_TOPIC => {
+            if args.len() >= 3 {
+                let _ = events_tx
+                    .send(NetworkEvent::System {
+                        network: profile.name.clone(),
+                        body: format!("topic {}: {}", args[1], args[2]),
+                        ts,
+                    })
+                    .await;
+            }
+        }
+        Response::RPL_NAMREPLY => {
+            if args.len() >= 4 {
+                let channel = args[2].clone();
+                let nicks = args[3]
+                    .split_whitespace()
+                    .map(|nick| nick.trim_start_matches(['@', '+', '%', '&', '~']))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                let _ = events_tx
+                    .send(NetworkEvent::NickList {
+                        network: profile.name.clone(),
+                        channel,
+                        nicks,
+                    })
+                    .await;
+            }
+        }
+        Response::RPL_MOTD | Response::RPL_MOTDSTART => {
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: args.join(" "),
+                    ts,
+                })
+                .await;
+        }
+        Response::RPL_SASLSUCCESS => {
+            runtime.sasl_in_progress = false;
+            runtime.sasl_done = true;
+            write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: "SASL authentication successful".to_owned(),
+                    ts,
+                })
+                .await;
+        }
+        Response::ERR_SASLFAIL
+        | Response::ERR_SASLTOOLONG
+        | Response::ERR_SASLABORT
+        | Response::ERR_SASLALREADY => {
+            runtime.sasl_in_progress = false;
+            runtime.sasl_done = true;
+            write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: format!("SASL issue: {:?} {}", response, args.join(" ")),
+                    ts,
+                })
+                .await;
+        }
+        Response::ERR_NICKNAMEINUSE => {
+            let fallback = format!(
+                "{}{}",
+                runtime.current_nick,
+                rand::rng().random_range(1..99)
+            );
+            runtime.current_nick = fallback.clone();
+            write_command(writer, Command::NICK(fallback)).await?;
+        }
+        Response::ERR_NOTREGISTERED
+        | Response::ERR_NEEDMOREPARAMS
+        | Response::ERR_UNKNOWNCOMMAND
+        | Response::ERR_NOSUCHCHANNEL
+        | Response::ERR_CANNOTSENDTOCHAN
+        | Response::ERR_NOSUCHNICK => {
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: format!("error {:?}: {}", response, args.join(" ")),
+                    ts,
+                })
+                .await;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn send_sasl_payload<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    profile: &ServerProfile,
+) -> Result<(), NetError> {
+    let Some(sasl) = profile.sasl.as_ref() else {
+        return Ok(());
+    };
+
+    if !matches!(sasl.mechanism, SaslMechanism::Plain) {
+        return Ok(());
+    }
+
+    let Some(secret) = profile.secret.as_ref() else {
+        return Ok(());
+    };
+    let Some(password) = secret.sasl_password.as_ref().or(secret.password.as_ref()) else {
+        return Ok(());
+    };
+
+    let payload = format!("{}\0{}\0{}", sasl.account, sasl.account, password);
+    let encoded = STANDARD.encode(payload);
+    write_command(writer, Command::AUTHENTICATE(encoded)).await
+}
+
+fn parse_tags(tags: Option<Vec<Tag>>) -> BTreeMap<String, String> {
+    tags.unwrap_or_default()
+        .into_iter()
+        .map(|tag| (tag.0, tag.1.unwrap_or_default()))
+        .collect()
+}
+
+fn parse_timestamp(tags: &BTreeMap<String, String>) -> Option<DateTime<Utc>> {
+    tags.get("time")
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|ts| ts.with_timezone(&Utc))
+}
+
+type DynStream = Box<dyn AsyncReadWrite>;
+
+trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T> AsyncReadWrite for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
+
+async fn connect_stream(profile: &ServerProfile) -> Result<DynStream, NetError> {
+    let stream = TcpStream::connect((profile.host.as_str(), profile.port)).await?;
+    stream.set_nodelay(true)?;
+
+    if profile.tls {
+        let connector = tokio_native_tls::native_tls::TlsConnector::builder().build()?;
+        let connector = TlsConnector::from(connector);
+        let tls = connector.connect(profile.host.as_str(), stream).await?;
+        Ok(Box::new(tls))
+    } else {
+        Ok(Box::new(stream))
+    }
+}
+
+async fn write_command<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    command: Command,
+) -> Result<(), NetError> {
+    let line = String::from(&command);
+    write_raw_line(writer, &line).await
+}
+
+async fn write_raw_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> Result<(), NetError> {
+    let mut payload = line.trim_end_matches(['\r', '\n']).to_owned();
+    payload.push_str("\r\n");
+    writer.write_all(payload.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+enum ConnectionExit {
+    Requested,
+    Unexpected(String),
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    let exp = 2_u64.saturating_pow(attempt.min(10));
+    let base = Duration::from_secs(exp).min(Duration::from_secs(120));
+    let jitter = rand::rng().random_range(0..1_000_u64);
+    base + Duration::from_millis(jitter)
+}

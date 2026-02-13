@@ -1,0 +1,19 @@
+[package]
+name = "tirc-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["macos-notify"]
+macos-notify = ["dep:notify-rust"]
+
+[dependencies]
+notify-rust = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,268 @@
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    error::ConfigError,
+    paths::{AppPaths, enforce_private_file},
+};
+
+/// Top-level application configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    pub ui: UiConfig,
+    pub keymap: KeymapConfig,
+    pub logging: LoggingConfig,
+    pub profiles: Vec<ServerProfile>,
+    pub notifications: NotificationConfig,
+    pub performance: PerformanceConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            ui: UiConfig::default(),
+            keymap: KeymapConfig::default(),
+            logging: LoggingConfig::default(),
+            profiles: Vec::new(),
+            notifications: NotificationConfig::default(),
+            performance: PerformanceConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    pub theme: String,
+    pub show_nicklist: bool,
+    pub show_server_list: bool,
+    pub max_scrollback_lines: usize,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "tirc-default".to_owned(),
+            show_nicklist: true,
+            show_server_list: true,
+            max_scrollback_lines: 5_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeymapConfig {
+    pub active_map: String,
+}
+
+impl Default for KeymapConfig {
+    fn default() -> Self {
+        Self {
+            active_map: "default".to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    pub enabled: bool,
+    pub retention_days: u16,
+    pub redact_secrets: bool,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: 90,
+            redact_secrets: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationConfig {
+    pub bell_on_mention: bool,
+    pub bell_on_private_message: bool,
+    pub macos_notifications: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            bell_on_mention: true,
+            bell_on_private_message: true,
+            macos_notifications: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceConfig {
+    pub max_idle_redraw_hz: u8,
+    pub max_memory_mb: u16,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            max_idle_redraw_hz: 4,
+            max_memory_mb: 80,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerProfile {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub tls: bool,
+    pub nick: String,
+    pub user: String,
+    pub realname: String,
+    pub sasl: Option<SaslConfig>,
+    pub autojoin: Vec<String>,
+    pub secret: Option<SecretRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaslConfig {
+    pub mechanism: SaslMechanism,
+    pub account: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SaslMechanism {
+    #[default]
+    Plain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRef {
+    pub password: Option<String>,
+    pub sasl_password: Option<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedConfig {
+    pub source_path: PathBuf,
+    pub config: AppConfig,
+    pub warning_plaintext_secret: bool,
+}
+
+/// Load config from an explicit path or default XDG location.
+pub fn load_config(paths: &AppPaths, explicit: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+    let source_path = explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.config_file.clone());
+
+    if !source_path.exists() {
+        write_default_config(&source_path)?;
+    }
+
+    enforce_private_file(&source_path)?;
+
+    let raw = fs::read_to_string(&source_path)?;
+    let config: AppConfig = toml::from_str(&raw)?;
+
+    let warning_plaintext_secret = config.profiles.iter().any(|profile| {
+        profile
+            .secret
+            .as_ref()
+            .map(|s| s.password.is_some() || s.sasl_password.is_some())
+            .unwrap_or(false)
+    });
+
+    Ok(LoadedConfig {
+        source_path,
+        config,
+        warning_plaintext_secret,
+    })
+}
+
+/// Persist updated configuration with strict permissions.
+pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let serialized = toml::to_string_pretty(config)?;
+    let mut file = fs::File::create(path)?;
+    file.write_all(serialized.as_bytes())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+fn write_default_config(path: &Path) -> Result<(), ConfigError> {
+    let cfg = AppConfig::default();
+    save_config(path, &cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn writes_and_loads_default_config() {
+        let dir = tempdir().expect("tempdir");
+        let config_file = dir.path().join("config.toml");
+        let paths = AppPaths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            config_file: config_file.clone(),
+            themes_dir: dir.path().join("themes"),
+            keymaps_dir: dir.path().join("keymaps"),
+            session_file: dir.path().join("state").join("session.json"),
+            logs_dir: dir.path().join("state").join("logs"),
+        };
+
+        paths.ensure_dirs().expect("dirs");
+        let loaded = load_config(&paths, Some(&config_file)).expect("load config");
+        assert!(config_file.exists());
+        assert_eq!(loaded.config.ui.theme, "tirc-default");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_world_readable_secret_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let config_file = dir.path().join("config.toml");
+        let cfg = AppConfig::default();
+        save_config(&config_file, &cfg).expect("save");
+        std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod");
+
+        let paths = AppPaths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            config_file: config_file.clone(),
+            themes_dir: dir.path().join("themes"),
+            keymaps_dir: dir.path().join("keymaps"),
+            session_file: dir.path().join("state").join("session.json"),
+            logs_dir: dir.path().join("state").join("logs"),
+        };
+
+        let err = load_config(&paths, Some(&config_file)).expect_err("should fail permissions");
+        assert!(matches!(err, ConfigError::InsecurePermissions { .. }));
+    }
+}

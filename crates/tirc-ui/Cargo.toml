@@ -1,0 +1,19 @@
+[package]
+name = "tirc-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crossterm.workspace = true
+nucleo-matcher.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+unicode-width.workspace = true
+tirc-config = { path = "../tirc-config" }
+tirc-core = { path = "../tirc-core" }

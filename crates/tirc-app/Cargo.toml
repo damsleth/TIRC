@@ -1,0 +1,29 @@
+[package]
+name = "tirc-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tirc"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tirc-config = { path = "../tirc-config" }
+tirc-core = { path = "../tirc-core" }
+tirc-net = { path = "../tirc-net" }
+tirc-platform = { path = "../tirc-platform" }
+tirc-ui = { path = "../tirc-ui" }
