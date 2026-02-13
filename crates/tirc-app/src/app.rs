@@ -19,7 +19,7 @@ use tirc_core::{
     AppEvent, CommandEvent, CommandRegistry, CommandSource, LogRecord, LogWriter, NetworkEvent,
     TimerEvent, UiEvent, build_session_snapshot, load_session, save_session,
 };
-use tirc_net::{NetCommand, NetManager};
+use tirc_net::{NetCommand, NetError, NetManager};
 use tirc_platform::PlatformNotifier;
 use tirc_ui::{UiEngine, UiIntent};
 
@@ -47,6 +47,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         );
     }
 
+    let enabled_profiles = runtime_config
+        .profiles
+        .iter()
+        .filter(|profile| profile.enabled)
+        .collect::<Vec<_>>();
+
     if runtime_config.profiles.is_empty() {
         state.warnings.push(
             "No IRC profiles configured. Edit ~/.config/tirc/config.toml to add at least one."
@@ -56,7 +62,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             "No profiles configured. Add one in ~/.config/tirc/config.toml".to_owned(),
             Duration::from_secs(6),
         );
-    } else if runtime_config.profiles.len() == 1 && runtime_config.profiles[0].name == "default" {
+    } else if enabled_profiles.is_empty() {
+        state.warnings.push(
+            "All profiles are disabled. Set profiles[].enabled = true to use one.".to_owned(),
+        );
+        state.set_status_for(
+            "No enabled profiles. Enable one in ~/.config/tirc/config.toml".to_owned(),
+            Duration::from_secs(6),
+        );
+    } else if enabled_profiles.len() == 1 && enabled_profiles[0].name == "default" {
         state.set_status(
             "Using starter profile 'default'. Run /connect default or edit config.toml".to_owned(),
         );
@@ -101,7 +115,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         if let Some(profile) = runtime_config
             .profiles
             .iter()
-            .find(|profile| profile.name == *profile_name)
+            .find(|profile| profile.name == *profile_name && profile.enabled)
         {
             net_manager.connect_profile(profile.clone()).await?;
             state.set_status_for(
@@ -110,7 +124,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             );
         } else {
             state.set_status_for(
-                format!("Profile not found: {profile_name}"),
+                format!("Enabled profile not found: {profile_name}"),
                 Duration::from_millis(2_000),
             );
         }
@@ -151,7 +165,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let evt = event::read()?;
             let intents = ui.handle_terminal_event(evt);
             if !intents.is_empty() {
-                let open_config_editor = handle_ui_intents(
+                let side_effects = handle_ui_intents(
                     intents,
                     &mut state,
                     &mut ui,
@@ -162,7 +176,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     &logger,
                 )
                 .await;
-                if open_config_editor {
+                if side_effects.open_config_editor {
                     if let Err(err) = open_config_in_editor(&mut terminal, &paths.config_file) {
                         state.set_status_for(
                             format!("failed to open config in editor: {err}"),
@@ -182,6 +196,17 @@ pub async fn run(cli: Cli) -> Result<()> {
                                 Duration::from_millis(2_000),
                             );
                         }
+                    }
+                }
+                if side_effects.reload_config {
+                    if let Err(err) = reload_runtime_config(&paths, &mut runtime_config, &mut ui) {
+                        state.set_status_for(
+                            format!("failed to reload config: {err}"),
+                            Duration::from_millis(2_000),
+                        );
+                    } else {
+                        state
+                            .set_status_for("Configuration reloaded", Duration::from_millis(2_000));
                     }
                 }
                 needs_draw = true;
@@ -300,15 +325,27 @@ async fn handle_ui_intents(
     paths: &AppPaths,
     runtime_config: &mut tirc_config::AppConfig,
     logger: &LogWriter,
-) -> bool {
-    let mut open_config_editor = false;
+) -> UiSideEffects {
+    let mut side_effects = UiSideEffects::default();
 
     for intent in intents {
         match intent {
             UiIntent::Event(UiEvent::PaletteExecute(selected)) => {
                 if selected == "edit config" {
-                    open_config_editor = true;
+                    side_effects.open_config_editor = true;
                     state.set_status("Opening config in $EDITOR...");
+                    continue;
+                }
+                if selected == "kill buffer" {
+                    ui.open_close_confirmation();
+                    state.set_status_for(
+                        "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
+                        Duration::from_millis(2_000),
+                    );
+                    continue;
+                }
+                if selected == "reload config" {
+                    side_effects.reload_config = true;
                     continue;
                 }
 
@@ -324,9 +361,52 @@ async fn handle_ui_intents(
                     .await;
                 }
             }
+            UiIntent::Event(UiEvent::Action(action)) if action == "config.reload" => {
+                side_effects.reload_config = true;
+            }
+            UiIntent::Event(UiEvent::Action(action)) if action == "buffer.close.confirm" => {
+                ui.open_close_confirmation();
+                state.set_status_for(
+                    "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
+                    Duration::from_millis(2_000),
+                );
+            }
+            UiIntent::Event(UiEvent::Action(action)) if action == "buffer.close.current" => {
+                close_focused_buffer(state, net_manager).await;
+            }
             UiIntent::Event(event) => state.apply(AppEvent::Ui(event)),
             UiIntent::SubmitLine(line) => {
                 if line.trim().is_empty() {
+                    continue;
+                }
+
+                if is_close_without_args(&line) {
+                    ui.open_close_confirmation();
+                    state.set_status_for(
+                        "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
+                        Duration::from_millis(2_000),
+                    );
+                    continue;
+                }
+
+                if is_join_without_args(&line) {
+                    for generated in ui.begin_join_interactive() {
+                        match generated {
+                            UiIntent::Event(event) => state.apply(AppEvent::Ui(event)),
+                            UiIntent::SubmitLine(generated_line) => {
+                                execute_command_line(
+                                    &generated_line,
+                                    CommandSource::Slash,
+                                    state,
+                                    net_manager,
+                                    command_registry,
+                                    &runtime_config.profiles,
+                                )
+                                .await;
+                            }
+                            UiIntent::ApplyTheme(_) | UiIntent::ApplyKeymap(_) => {}
+                        }
+                    }
                     continue;
                 }
 
@@ -402,7 +482,7 @@ async fn handle_ui_intents(
         }
     }
 
-    open_config_editor
+    side_effects
 }
 
 async fn send_chat_line(
@@ -419,7 +499,7 @@ async fn send_chat_line(
 
     if focus.network == "local" {
         state.set_status_for(
-            "Cannot send without an active network buffer".to_owned(),
+            "Cannot send without an active profile buffer".to_owned(),
             Duration::from_millis(2_000),
         );
         return;
@@ -516,9 +596,13 @@ async fn execute_command_line(
                     );
                 }
             }
-            tirc_core::OutboundCommand::Part { network, channel } => {
+            tirc_core::OutboundCommand::Part {
+                network,
+                channel,
+                reason,
+            } => {
                 if let Err(err) = net_manager
-                    .send_command(&network, NetCommand::Part(channel))
+                    .send_command(&network, NetCommand::Part { channel, reason })
                     .await
                 {
                     state.set_status_for(
@@ -533,11 +617,30 @@ async fn execute_command_line(
                 body,
             } => {
                 if let Err(err) = net_manager
-                    .send_command(&network, NetCommand::Privmsg { target, body })
+                    .send_command(
+                        &network,
+                        NetCommand::Privmsg {
+                            target: target.clone(),
+                            body: body.clone(),
+                        },
+                    )
                     .await
                 {
                     state
                         .set_status_for(format!("msg failed: {err}"), Duration::from_millis(2_000));
+                } else {
+                    state.ensure_buffer(&network, &target);
+                    state.push_message(
+                        &network,
+                        &target,
+                        tirc_core::Message {
+                            ts: Utc::now(),
+                            sender: None,
+                            body,
+                            mention: false,
+                            tags: BTreeMap::new(),
+                        },
+                    );
                 }
             }
             tirc_core::OutboundCommand::Nick { network, nick } => {
@@ -551,9 +654,18 @@ async fn execute_command_line(
                     );
                 }
             }
+            tirc_core::OutboundCommand::List { network } => {
+                if let Err(err) = net_manager.send_command(&network, NetCommand::List).await {
+                    state.set_status_for(
+                        format!("list failed: {err}"),
+                        Duration::from_millis(2_000),
+                    );
+                }
+            }
             tirc_core::OutboundCommand::Connect { profile } => {
-                if let Some(profile_cfg) =
-                    profiles.iter().find(|candidate| candidate.name == profile)
+                if let Some(profile_cfg) = profiles
+                    .iter()
+                    .find(|candidate| candidate.name == profile && candidate.enabled)
                 {
                     if let Err(err) = net_manager.connect_profile(profile_cfg.clone()).await {
                         state.set_status_for(
@@ -594,7 +706,7 @@ async fn execute_command_line(
                     }
                 } else {
                     state.set_status_for(
-                        format!("profile not found: {profile}"),
+                        format!("enabled profile not found: {profile}"),
                         Duration::from_millis(2_000),
                     );
                 }
@@ -605,10 +717,25 @@ async fn execute_command_line(
                         format!("disconnect failed: {err}"),
                         Duration::from_millis(2_000),
                     );
+                } else {
+                    state.apply(AppEvent::Network(NetworkEvent::Disconnected {
+                        network: network.clone(),
+                        reason: "manual disconnect".to_owned(),
+                    }));
+                    state.set_status_for(
+                        format!("Disconnected profile: {network}"),
+                        Duration::from_millis(2_000),
+                    );
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct UiSideEffects {
+    open_config_editor: bool,
+    reload_config: bool,
 }
 
 fn build_palette_items(
@@ -619,6 +746,7 @@ fn build_palette_items(
     let mut items = command_registry
         .specs()
         .iter()
+        .filter(|spec| spec.id != "connect" && spec.id != "buffer")
         .map(|spec| spec.id.to_owned())
         .collect::<Vec<_>>();
 
@@ -632,9 +760,12 @@ fn build_palette_items(
     items.extend(
         profiles
             .iter()
+            .filter(|profile| profile.enabled)
             .map(|profile| format!("connect {}", profile.name)),
     );
+    items.push("reload config".to_owned());
     items.push("edit config".to_owned());
+    items.push("kill buffer".to_owned());
 
     items.sort();
     items.dedup();
@@ -651,6 +782,75 @@ fn palette_to_command_line(selected: &str) -> Option<String> {
     }
 
     Some(format!("/{selected}"))
+}
+
+fn is_join_without_args(line: &str) -> bool {
+    let mut parts = line.trim().trim_start_matches('/').split_whitespace();
+    parts
+        .next()
+        .map(|command| command.eq_ignore_ascii_case("join"))
+        .unwrap_or(false)
+        && parts.next().is_none()
+}
+
+fn is_close_without_args(line: &str) -> bool {
+    let mut parts = line.trim().trim_start_matches('/').split_whitespace();
+    let is_close = parts
+        .next()
+        .map(|command| {
+            command.eq_ignore_ascii_case("kill") || command.eq_ignore_ascii_case("close")
+        })
+        .unwrap_or(false);
+    is_close && parts.next().is_none()
+}
+
+async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut NetManager) {
+    let Some(focus) = state.focus.clone() else {
+        state.set_status_for("No focused buffer to close", Duration::from_millis(2_000));
+        return;
+    };
+    let mut part_warning: Option<String> = None;
+    if focus.name.starts_with('#')
+        && let Err(err) = net_manager
+            .send_command(
+                &focus.network,
+                NetCommand::Part {
+                    channel: focus.name.clone(),
+                    reason: Some("closing buffer".to_owned()),
+                },
+            )
+            .await
+    {
+        if !matches!(err, NetError::UnknownNetwork(_)) {
+            part_warning = Some(err.to_string());
+        }
+    }
+
+    let removed = state.buffers.remove(&focus).is_some();
+    if !removed {
+        state.set_status_for("Focused buffer not found", Duration::from_millis(2_000));
+        return;
+    }
+
+    if let Some(network) = state.networks.get_mut(&focus.network) {
+        network.channels.remove(&focus.name);
+    }
+
+    state.focus = state.buffers.keys().next().cloned();
+
+    match part_warning {
+        Some(err) => state.set_status_for(
+            format!(
+                "Closed buffer {}/{} (part failed: {err})",
+                focus.network, focus.name
+            ),
+            Duration::from_millis(2_000),
+        ),
+        None => state.set_status_for(
+            format!("Closed buffer {}/{}", focus.network, focus.name),
+            Duration::from_millis(2_000),
+        ),
+    }
 }
 
 fn open_config_in_editor(

@@ -1,15 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tirc_config::{Keymap, Theme};
 use tirc_core::{AppViewModel, UiEvent};
@@ -90,6 +90,30 @@ enum EditorKind {
     Keymap,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaletteMode {
+    Normal,
+    JoinProfile,
+    JoinChannel { profile: String },
+    MsgProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComposerMode {
+    JoinChannel { profile: String },
+    MsgTarget { profile: String },
+    MsgBody { profile: String, target: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusPane {
+    Servers,
+    Buffers,
+    Chat,
+    Nicklist,
+    Input,
+}
+
 /// Stateful ratatui engine for rendering and keyboard handling.
 pub struct UiEngine {
     theme: Theme,
@@ -97,8 +121,30 @@ pub struct UiEngine {
     input: InputEditor,
     pub palette_open: bool,
     palette: PaletteEngine,
+    palette_items: Vec<String>,
+    palette_mode: PaletteMode,
     theme_editor: SelectionEditor,
     keymap_editor: SelectionEditor,
+    close_confirm_open: bool,
+    connected_profiles: Vec<String>,
+    channel_list_cache: BTreeMap<String, Vec<tirc_core::ChannelListEntry>>,
+    server_names: Vec<String>,
+    buffer_refs: Vec<(String, String)>,
+    nick_refs: Vec<String>,
+    active_profile: Option<String>,
+    focus_pane: FocusPane,
+    server_selected: usize,
+    buffer_selected: usize,
+    nick_selected: usize,
+    composer: Option<ComposerMode>,
+    input_history: Vec<String>,
+    input_history_index: Option<usize>,
+    input_history_draft: String,
+    chat_scroll: u16,
+    chat_max_scroll: u16,
+    chat_page_step: u16,
+    chat_follow_tail: bool,
+    last_active_buffer: Option<String>,
     help_open: bool,
     last_draw: Instant,
     idle_hz: u8,
@@ -123,9 +169,31 @@ impl UiEngine {
             keymap_actions,
             input: InputEditor::default(),
             palette_open: false,
-            palette: PaletteEngine::new(palette_items),
+            palette: PaletteEngine::new(palette_items.clone()),
+            palette_items,
+            palette_mode: PaletteMode::Normal,
             theme_editor: SelectionEditor::with_options(theme_options, active_theme),
             keymap_editor: SelectionEditor::with_options(keymap_options, active_keymap),
+            close_confirm_open: false,
+            connected_profiles: Vec::new(),
+            channel_list_cache: BTreeMap::new(),
+            server_names: Vec::new(),
+            buffer_refs: Vec::new(),
+            nick_refs: Vec::new(),
+            active_profile: None,
+            focus_pane: FocusPane::Input,
+            server_selected: 0,
+            buffer_selected: 0,
+            nick_selected: 0,
+            composer: None,
+            input_history: Vec::new(),
+            input_history_index: None,
+            input_history_draft: String::new(),
+            chat_scroll: 0,
+            chat_max_scroll: 0,
+            chat_page_step: 8,
+            chat_follow_tail: true,
+            last_active_buffer: None,
             help_open: false,
             last_draw: Instant::now(),
             idle_hz,
@@ -167,13 +235,24 @@ impl UiEngine {
     }
 
     pub fn set_palette_items(&mut self, items: Vec<String>) {
-        self.palette.set_items(items);
+        self.palette_items = items;
+        if self.palette_mode == PaletteMode::Normal {
+            self.palette.set_items(self.palette_items.clone());
+        }
     }
 
     pub fn sync_input(&mut self, value: &str) {
         if self.input.text() != value {
             self.input.set_text(value.to_owned());
         }
+    }
+
+    pub fn begin_join_interactive(&mut self) -> Vec<UiIntent> {
+        self.start_join_composer()
+    }
+
+    pub fn open_close_confirmation(&mut self) {
+        self.close_confirm_open = true;
     }
 
     pub fn max_idle_interval(&self) -> Duration {
@@ -187,6 +266,15 @@ impl UiEngine {
     pub fn draw(&mut self, frame: &mut Frame, vm: &AppViewModel) {
         self.last_draw = Instant::now();
         self.help_open = vm.help_open;
+        self.connected_profiles = vm
+            .networks
+            .iter()
+            .filter(|network| network.connected)
+            .map(|network| network.name.clone())
+            .collect::<Vec<_>>();
+        self.connected_profiles.sort();
+        self.connected_profiles.dedup();
+        self.channel_list_cache = vm.channel_list_cache.clone();
 
         let area = frame.area();
         let root = Layout::default()
@@ -212,6 +300,56 @@ impl UiEngine {
             .constraints([Constraint::Length(7), Constraint::Min(4)])
             .split(top[0]);
 
+        self.server_names = vm
+            .networks
+            .iter()
+            .map(|network| network.name.clone())
+            .collect();
+        if self.server_names.is_empty() {
+            self.server_selected = 0;
+        } else {
+            self.server_selected = self
+                .server_selected
+                .min(self.server_names.len().saturating_sub(1));
+        }
+
+        self.buffer_refs = vm
+            .buffers
+            .iter()
+            .map(|buffer| (buffer.id.network.clone(), buffer.id.name.clone()))
+            .collect();
+        if self.buffer_refs.is_empty() {
+            self.buffer_selected = 0;
+        } else {
+            self.buffer_selected = self
+                .buffer_selected
+                .min(self.buffer_refs.len().saturating_sub(1));
+        }
+
+        let active_focus = vm
+            .active_buffer
+            .as_ref()
+            .map(|buffer| (buffer.id.network.clone(), buffer.id.name.clone()));
+        if let Some((network, name)) = active_focus.clone() {
+            if let Some(index) =
+                self.buffer_refs
+                    .iter()
+                    .position(|(candidate_network, candidate_name)| {
+                        candidate_network == &network && candidate_name == &name
+                    })
+            {
+                self.buffer_selected = index;
+            }
+
+            if let Some(index) = self
+                .server_names
+                .iter()
+                .position(|candidate| candidate == &network)
+            {
+                self.server_selected = index;
+            }
+        }
+
         let network_items = vm
             .networks
             .iter()
@@ -221,9 +359,27 @@ impl UiEngine {
             })
             .collect::<Vec<_>>();
 
-        frame.render_widget(
-            List::new(network_items).block(Block::default().title("Servers").borders(Borders::ALL)),
+        let mut server_state = ListState::default();
+        if !network_items.is_empty() {
+            server_state.select(Some(self.server_selected));
+        }
+        frame.render_stateful_widget(
+            List::new(network_items)
+                .highlight_style(focus_style(
+                    &self.theme,
+                    self.focus_pane == FocusPane::Servers,
+                ))
+                .block(
+                    Block::default()
+                        .title("Servers")
+                        .borders(Borders::ALL)
+                        .border_style(border_style(
+                            &self.theme,
+                            self.focus_pane == FocusPane::Servers,
+                        )),
+                ),
             left[0],
+            &mut server_state,
         );
 
         let buffer_items = vm
@@ -242,9 +398,27 @@ impl UiEngine {
             })
             .collect::<Vec<_>>();
 
-        frame.render_widget(
-            List::new(buffer_items).block(Block::default().title("Buffers").borders(Borders::ALL)),
+        let mut buffer_state = ListState::default();
+        if !buffer_items.is_empty() {
+            buffer_state.select(Some(self.buffer_selected));
+        }
+        frame.render_stateful_widget(
+            List::new(buffer_items)
+                .highlight_style(focus_style(
+                    &self.theme,
+                    self.focus_pane == FocusPane::Buffers,
+                ))
+                .block(
+                    Block::default()
+                        .title("Buffers")
+                        .borders(Borders::ALL)
+                        .border_style(border_style(
+                            &self.theme,
+                            self.focus_pane == FocusPane::Buffers,
+                        )),
+                ),
             left[1],
+            &mut buffer_state,
         );
 
         let chat_title = vm
@@ -252,6 +426,10 @@ impl UiEngine {
             .as_ref()
             .map(|buffer| format!("{} / {}", buffer.id.network, buffer.id.name))
             .unwrap_or_else(|| "No active buffer".to_owned());
+        self.active_profile = vm
+            .active_buffer
+            .as_ref()
+            .map(|buffer| buffer.id.network.clone());
 
         let chat_lines = vm
             .active_buffer
@@ -278,9 +456,40 @@ impl UiEngine {
             })
             .unwrap_or_default();
 
+        let active_buffer_key = vm
+            .active_buffer
+            .as_ref()
+            .map(|buffer| format!("{}/{}", buffer.id.network, buffer.id.name));
+        if self.last_active_buffer != active_buffer_key {
+            self.last_active_buffer = active_buffer_key;
+            self.chat_follow_tail = true;
+        }
+
+        let viewport_lines = top[1].height.saturating_sub(2).max(1);
+        self.chat_page_step = viewport_lines.saturating_sub(1).max(1);
+        self.chat_max_scroll = chat_lines
+            .len()
+            .saturating_sub(usize::from(viewport_lines))
+            .try_into()
+            .unwrap_or(u16::MAX);
+        if self.chat_follow_tail {
+            self.chat_scroll = self.chat_max_scroll;
+        } else {
+            self.chat_scroll = self.chat_scroll.min(self.chat_max_scroll);
+        }
+
         frame.render_widget(
             Paragraph::new(chat_lines)
-                .block(Block::default().title(chat_title).borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title(chat_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style(
+                            &self.theme,
+                            self.focus_pane == FocusPane::Chat,
+                        )),
+                )
+                .scroll((self.chat_scroll, 0))
                 .wrap(Wrap { trim: false }),
             top[1],
         );
@@ -289,17 +498,47 @@ impl UiEngine {
             .active_buffer
             .as_ref()
             .map(|buffer| {
+                self.nick_refs = buffer.nicklist.clone();
                 buffer
                     .nicklist
                     .iter()
                     .map(|nick| ListItem::new(nick.clone()))
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                self.nick_refs.clear();
+                Vec::new()
+            });
+        if self.nick_refs.is_empty() {
+            self.nick_selected = 0;
+        } else {
+            self.nick_selected = self
+                .nick_selected
+                .min(self.nick_refs.len().saturating_sub(1));
+        }
 
-        frame.render_widget(
-            List::new(nick_items).block(Block::default().title("Nicklist").borders(Borders::ALL)),
+        let nick_count = self.nick_refs.len();
+        let mut nick_state = ListState::default();
+        if !nick_items.is_empty() {
+            nick_state.select(Some(self.nick_selected));
+        }
+        frame.render_stateful_widget(
+            List::new(nick_items)
+                .highlight_style(focus_style(
+                    &self.theme,
+                    self.focus_pane == FocusPane::Nicklist,
+                ))
+                .block(
+                    Block::default()
+                        .title(format!("Nicklist [{nick_count}]"))
+                        .borders(Borders::ALL)
+                        .border_style(border_style(
+                            &self.theme,
+                            self.focus_pane == FocusPane::Nicklist,
+                        )),
+                ),
             top[2],
+            &mut nick_state,
         );
 
         let status_style = Style::default()
@@ -311,7 +550,26 @@ impl UiEngine {
             root[1],
         );
 
-        let input_block = Block::default().title("Input").borders(Borders::ALL);
+        let input_title = match &self.composer {
+            Some(ComposerMode::JoinChannel { profile }) => {
+                format!("Input (join {profile}: enter channel name)")
+            }
+            Some(ComposerMode::MsgTarget { profile }) => {
+                format!("Input (msg {profile}: enter target)")
+            }
+            Some(ComposerMode::MsgBody { profile, target }) => {
+                format!("Input (msg {profile} -> {target}: enter message)")
+            }
+            None => "Input".to_owned(),
+        };
+
+        let input_block = Block::default()
+            .title(input_title)
+            .borders(Borders::ALL)
+            .border_style(border_style(
+                &self.theme,
+                self.focus_pane == FocusPane::Input,
+            ));
         frame.render_widget(
             Paragraph::new(self.input.text().to_owned())
                 .style(Style::default().fg(parse_color(&self.theme.palette.foreground)))
@@ -334,11 +592,26 @@ impl UiEngine {
         if self.keymap_editor.open {
             self.render_selection_editor(frame, area, "Keymap Editor", &self.keymap_editor);
         }
+
+        if self.close_confirm_open {
+            self.render_close_confirmation(frame, area);
+        }
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Vec<UiIntent> {
         match event {
             Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_up_lines(3);
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_down_lines(3);
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                }
+                _ => Vec::new(),
+            },
             Event::Resize(width, height) => {
                 vec![UiIntent::Event(UiEvent::Resize { width, height })]
             }
@@ -370,6 +643,22 @@ impl UiEngine {
             }
         }
 
+        if self.close_confirm_open {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.close_confirm_open = false;
+                    return vec![UiIntent::Event(UiEvent::Action(
+                        "buffer.close.current".to_owned(),
+                    ))];
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.close_confirm_open = false;
+                    return Vec::new();
+                }
+                _ => return Vec::new(),
+            }
+        }
+
         if self.palette_open {
             return self.handle_palette_key(key);
         }
@@ -382,50 +671,116 @@ impl UiEngine {
             return self.handle_selection_editor_key(EditorKind::Keymap, key);
         }
 
+        match key.code {
+            KeyCode::Tab => {
+                self.cycle_focus_pane(1);
+                return vec![UiIntent::Event(UiEvent::Tick)];
+            }
+            KeyCode::BackTab => {
+                self.cycle_focus_pane(-1);
+                return vec![UiIntent::Event(UiEvent::Tick)];
+            }
+            KeyCode::Up if self.focus_pane != FocusPane::Input => {
+                return self.navigate_focused_pane(-1);
+            }
+            KeyCode::Down if self.focus_pane != FocusPane::Input => {
+                return self.navigate_focused_pane(1);
+            }
+            KeyCode::Enter
+                if self.focus_pane == FocusPane::Nicklist
+                    && self.composer.is_none()
+                    && !self.nick_refs.is_empty() =>
+            {
+                return self.open_pm_from_nicklist();
+            }
+            _ => {}
+        }
+
         if let Some(action) = self.lookup_action(key) {
             return self.handle_action(&action);
         }
 
         match key.code {
-            KeyCode::Enter => {
-                let line = self.input.text().to_owned();
+            KeyCode::Esc if self.composer.is_some() => {
+                self.composer = None;
                 self.input.clear();
+                self.clear_history_navigation();
+                vec![UiIntent::Event(UiEvent::InputChanged(String::new()))]
+            }
+            KeyCode::Enter => {
+                if self.composer.is_some() {
+                    return self.handle_composer_submit();
+                }
+                if self.focus_pane != FocusPane::Input {
+                    return Vec::new();
+                }
+                let line = self.input.text().to_owned();
+                self.push_history(line.clone());
+                self.input.clear();
+                self.input_history_index = None;
+                self.input_history_draft.clear();
                 vec![
                     UiIntent::Event(UiEvent::InputChanged(String::new())),
                     UiIntent::SubmitLine(line),
                 ]
             }
-            KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE => {
+            KeyCode::Up if self.focus_pane == FocusPane::Input => {
+                if self.history_prev() {
+                    vec![UiIntent::Event(UiEvent::InputChanged(
+                        self.input.text().to_owned(),
+                    ))]
+                } else {
+                    Vec::new()
+                }
+            }
+            KeyCode::Down if self.focus_pane == FocusPane::Input => {
+                if self.history_next() {
+                    vec![UiIntent::Event(UiEvent::InputChanged(
+                        self.input.text().to_owned(),
+                    ))]
+                } else {
+                    Vec::new()
+                }
+            }
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE
+                    && (self.focus_pane == FocusPane::Input || self.composer.is_some()) =>
+            {
+                self.clear_history_navigation();
                 self.input.insert_char(c);
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace
+                if self.focus_pane == FocusPane::Input || self.composer.is_some() =>
+            {
+                self.clear_history_navigation();
                 self.input.backspace();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            KeyCode::Delete => {
+            KeyCode::Delete if self.focus_pane == FocusPane::Input || self.composer.is_some() => {
+                self.clear_history_navigation();
                 self.input.delete();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            KeyCode::Left => {
+            KeyCode::Left if self.focus_pane == FocusPane::Input || self.composer.is_some() => {
                 self.input.move_left();
                 Vec::new()
             }
-            KeyCode::Right => {
+            KeyCode::Right if self.focus_pane == FocusPane::Input || self.composer.is_some() => {
                 self.input.move_right();
                 Vec::new()
             }
-            KeyCode::Home => {
+            KeyCode::Home if self.focus_pane == FocusPane::Input || self.composer.is_some() => {
                 self.input.move_home();
                 Vec::new()
             }
-            KeyCode::End => {
+            KeyCode::End if self.focus_pane == FocusPane::Input || self.composer.is_some() => {
                 self.input.move_end();
                 Vec::new()
             }
@@ -438,24 +793,40 @@ impl UiEngine {
             KeyCode::Esc => {
                 self.palette_open = false;
                 self.palette.clear_query();
+                self.reset_palette_mode();
                 vec![UiIntent::Event(UiEvent::Action(
                     "palette.toggle".to_owned(),
                 ))]
             }
             KeyCode::Up => {
                 self.palette.move_selection_up();
-                Vec::new()
+                vec![UiIntent::Event(UiEvent::Tick)]
             }
             KeyCode::Down => {
                 self.palette.move_selection_down();
-                Vec::new()
+                vec![UiIntent::Event(UiEvent::Tick)]
             }
             KeyCode::Enter => {
-                if let Some(selected) = self.palette.selected_item() {
-                    self.palette_open = false;
-                    vec![UiIntent::Event(UiEvent::PaletteExecute(
-                        selected.to_owned(),
-                    ))]
+                if let Some(selected) = self.palette.selected_item().map(ToOwned::to_owned) {
+                    match self.palette_mode.clone() {
+                        PaletteMode::Normal => self.handle_palette_selection(selected),
+                        PaletteMode::JoinProfile => self.start_join_for_profile(selected),
+                        PaletteMode::JoinChannel { profile } => {
+                            let channel = selected
+                                .split_whitespace()
+                                .next()
+                                .map(ToOwned::to_owned)
+                                .unwrap_or(selected);
+                            self.reset_palette_mode();
+                            self.palette_open = false;
+                            self.submit_join_line(profile, channel)
+                        }
+                        PaletteMode::MsgProfile => {
+                            self.reset_palette_mode();
+                            self.palette_open = false;
+                            self.begin_msg_target(selected)
+                        }
+                    }
                 } else {
                     Vec::new()
                 }
@@ -515,7 +886,9 @@ impl UiEngine {
             "palette.toggle" => {
                 self.palette_open = !self.palette_open;
                 if self.palette_open {
+                    self.reset_palette_mode();
                     self.palette.clear_query();
+                    self.palette.set_items(self.palette_items.clone());
                 }
                 self.theme_editor.open = false;
                 self.keymap_editor.open = false;
@@ -534,6 +907,10 @@ impl UiEngine {
                 self.palette_open = false;
                 vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
             }
+            "buffer.close.confirm" => {
+                self.close_confirm_open = true;
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
             "input.home" => {
                 self.input.move_home();
                 Vec::new()
@@ -543,25 +920,363 @@ impl UiEngine {
                 Vec::new()
             }
             "input.kill_to_end" => {
+                self.clear_history_navigation();
                 self.input.kill_to_end();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
             "input.kill_to_start" => {
+                self.clear_history_navigation();
                 self.input.kill_to_start();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
             "input.kill_word" => {
+                self.clear_history_navigation();
                 self.input.kill_word();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
+            "scroll.up_page" => {
+                self.scroll_up_lines(self.chat_page_step);
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            "scroll.down_page" => {
+                self.scroll_down_lines(self.chat_page_step);
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            "scroll.up_line" => {
+                self.scroll_up_lines(1);
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            "scroll.down_line" => {
+                self.scroll_down_lines(1);
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
             _ => vec![UiIntent::Event(UiEvent::Action(action.to_owned()))],
         }
+    }
+
+    fn handle_palette_selection(&mut self, selected: String) -> Vec<UiIntent> {
+        match selected.as_str() {
+            "join" => self.start_join_composer(),
+            "msg" => self.start_msg_composer(),
+            _ => {
+                self.palette_open = false;
+                vec![UiIntent::Event(UiEvent::PaletteExecute(selected))]
+            }
+        }
+    }
+
+    fn start_join_composer(&mut self) -> Vec<UiIntent> {
+        if self.connected_profiles.len() == 1 {
+            return self.start_join_for_profile(self.connected_profiles[0].clone());
+        }
+        if self.connected_profiles.len() > 1 {
+            self.palette_mode = PaletteMode::JoinProfile;
+            self.palette.clear_query();
+            self.palette.set_items(self.connected_profiles.clone());
+            self.palette_open = true;
+            return Vec::new();
+        }
+
+        self.palette_open = false;
+        vec![UiIntent::Event(UiEvent::PaletteExecute("join".to_owned()))]
+    }
+
+    fn start_join_for_profile(&mut self, profile: String) -> Vec<UiIntent> {
+        let cached = self
+            .channel_list_cache
+            .get(&profile)
+            .cloned()
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            let mut items = cached
+                .iter()
+                .map(|entry| format!("{} ({}) {}", entry.channel, entry.users, entry.topic))
+                .collect::<Vec<_>>();
+            items.sort();
+            items.dedup();
+            self.palette_mode = PaletteMode::JoinChannel {
+                profile: profile.clone(),
+            };
+            self.palette.clear_query();
+            self.palette.set_items(items);
+            self.palette_open = true;
+            return Vec::new();
+        }
+
+        self.begin_join_channel(profile)
+    }
+
+    fn start_msg_composer(&mut self) -> Vec<UiIntent> {
+        if self.connected_profiles.len() == 1 {
+            return self.begin_msg_target(self.connected_profiles[0].clone());
+        }
+        if self.connected_profiles.len() > 1 {
+            self.palette_mode = PaletteMode::MsgProfile;
+            self.palette.clear_query();
+            self.palette.set_items(self.connected_profiles.clone());
+            return Vec::new();
+        }
+
+        self.palette_open = false;
+        vec![UiIntent::Event(UiEvent::PaletteExecute("msg".to_owned()))]
+    }
+
+    fn begin_join_channel(&mut self, profile: String) -> Vec<UiIntent> {
+        self.palette_open = false;
+        self.palette.clear_query();
+        self.composer = Some(ComposerMode::JoinChannel { profile });
+        self.focus_pane = FocusPane::Input;
+        self.input.set_text("#".to_owned());
+        vec![UiIntent::Event(UiEvent::InputChanged("#".to_owned()))]
+    }
+
+    fn begin_msg_target(&mut self, profile: String) -> Vec<UiIntent> {
+        self.palette_open = false;
+        self.palette.clear_query();
+        self.composer = Some(ComposerMode::MsgTarget { profile });
+        self.focus_pane = FocusPane::Input;
+        self.input.clear();
+        vec![UiIntent::Event(UiEvent::InputChanged(String::new()))]
+    }
+
+    fn submit_join_line(&mut self, profile: String, channel: String) -> Vec<UiIntent> {
+        let normalized = if channel.starts_with('#') {
+            channel
+        } else {
+            format!("#{channel}")
+        };
+        let line = format!("/join {profile} {normalized}");
+        self.push_history(line.clone());
+        self.input_history_index = None;
+        self.input_history_draft.clear();
+        self.focus_pane = FocusPane::Input;
+        vec![
+            UiIntent::Event(UiEvent::InputChanged(String::new())),
+            UiIntent::SubmitLine(line),
+        ]
+    }
+
+    fn handle_composer_submit(&mut self) -> Vec<UiIntent> {
+        match self.composer.clone() {
+            Some(ComposerMode::JoinChannel { profile }) => {
+                let raw = self.input.text().trim().trim_start_matches('#').to_owned();
+                if raw.is_empty() {
+                    return Vec::new();
+                }
+                self.composer = None;
+                self.input.clear();
+                self.submit_join_line(profile, raw)
+            }
+            Some(ComposerMode::MsgTarget { profile }) => {
+                let target = self.input.text().trim().to_owned();
+                if target.is_empty() {
+                    return Vec::new();
+                }
+                self.composer = Some(ComposerMode::MsgBody { profile, target });
+                self.input.clear();
+                vec![UiIntent::Event(UiEvent::InputChanged(String::new()))]
+            }
+            Some(ComposerMode::MsgBody { profile, target }) => {
+                let body = self.input.text().trim().to_owned();
+                if body.is_empty() {
+                    return Vec::new();
+                }
+                let line = format!("/msg {profile} {target} {body}");
+                self.push_history(line.clone());
+                self.composer = None;
+                self.input.clear();
+                self.input_history_index = None;
+                self.input_history_draft.clear();
+                vec![
+                    UiIntent::Event(UiEvent::InputChanged(String::new())),
+                    UiIntent::SubmitLine(line),
+                ]
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn reset_palette_mode(&mut self) {
+        self.palette_mode = PaletteMode::Normal;
+        self.palette.set_items(self.palette_items.clone());
+    }
+
+    fn clear_history_navigation(&mut self) {
+        self.input_history_index = None;
+        self.input_history_draft.clear();
+    }
+
+    fn push_history(&mut self, line: String) {
+        if line.trim().is_empty() {
+            return;
+        }
+        self.input_history.push(line);
+        const MAX_HISTORY: usize = 512;
+        if self.input_history.len() > MAX_HISTORY {
+            let _ = self.input_history.remove(0);
+        }
+    }
+
+    fn history_prev(&mut self) -> bool {
+        if self.input_history.is_empty() {
+            return false;
+        }
+
+        match self.input_history_index {
+            None => {
+                self.input_history_draft = self.input.text().to_owned();
+                self.input_history_index = Some(self.input_history.len().saturating_sub(1));
+            }
+            Some(0) => {}
+            Some(index) => self.input_history_index = Some(index.saturating_sub(1)),
+        }
+
+        if let Some(index) = self.input_history_index
+            && let Some(entry) = self.input_history.get(index)
+        {
+            self.input.set_text(entry.clone());
+            return true;
+        }
+
+        false
+    }
+
+    fn history_next(&mut self) -> bool {
+        let Some(index) = self.input_history_index else {
+            return false;
+        };
+
+        if index + 1 < self.input_history.len() {
+            self.input_history_index = Some(index + 1);
+            if let Some(entry) = self.input_history.get(index + 1) {
+                self.input.set_text(entry.clone());
+                return true;
+            }
+            return false;
+        }
+
+        self.input_history_index = None;
+        self.input.set_text(self.input_history_draft.clone());
+        self.input_history_draft.clear();
+        true
+    }
+
+    fn scroll_up_lines(&mut self, lines: u16) {
+        self.chat_follow_tail = false;
+        self.chat_scroll = self.chat_scroll.saturating_sub(lines);
+    }
+
+    fn scroll_down_lines(&mut self, lines: u16) {
+        self.chat_scroll = self
+            .chat_scroll
+            .saturating_add(lines)
+            .min(self.chat_max_scroll);
+        if self.chat_scroll >= self.chat_max_scroll {
+            self.chat_follow_tail = true;
+        }
+    }
+
+    fn cycle_focus_pane(&mut self, direction: i8) {
+        let panes = [
+            FocusPane::Servers,
+            FocusPane::Buffers,
+            FocusPane::Chat,
+            FocusPane::Nicklist,
+            FocusPane::Input,
+        ];
+        let current = panes
+            .iter()
+            .position(|pane| pane == &self.focus_pane)
+            .unwrap_or(0);
+        let next = if direction < 0 {
+            current
+                .checked_sub(1)
+                .unwrap_or(panes.len().saturating_sub(1))
+        } else {
+            (current + 1) % panes.len()
+        };
+        self.focus_pane = panes[next];
+    }
+
+    fn navigate_focused_pane(&mut self, direction: i8) -> Vec<UiIntent> {
+        match self.focus_pane {
+            FocusPane::Servers => {
+                if self.server_names.is_empty() {
+                    return Vec::new();
+                }
+                if direction < 0 {
+                    self.server_selected = self
+                        .server_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.server_names.len().saturating_sub(1));
+                } else {
+                    self.server_selected = (self.server_selected + 1) % self.server_names.len();
+                }
+
+                let Some(profile) = self.server_names.get(self.server_selected).cloned() else {
+                    return Vec::new();
+                };
+                vec![UiIntent::SubmitLine(format!("/buffer {profile} status"))]
+            }
+            FocusPane::Buffers => {
+                if self.buffer_refs.is_empty() {
+                    return Vec::new();
+                }
+                if direction < 0 {
+                    self.buffer_selected = self
+                        .buffer_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.buffer_refs.len().saturating_sub(1));
+                } else {
+                    self.buffer_selected = (self.buffer_selected + 1) % self.buffer_refs.len();
+                }
+                let Some((profile, buffer)) = self.buffer_refs.get(self.buffer_selected).cloned()
+                else {
+                    return Vec::new();
+                };
+                vec![UiIntent::SubmitLine(format!("/buffer {profile} {buffer}"))]
+            }
+            FocusPane::Chat => {
+                if direction < 0 {
+                    self.scroll_up_lines(1);
+                } else {
+                    self.scroll_down_lines(1);
+                }
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            FocusPane::Nicklist => {
+                if self.nick_refs.is_empty() {
+                    return Vec::new();
+                }
+                if direction < 0 {
+                    self.nick_selected = self
+                        .nick_selected
+                        .checked_sub(1)
+                        .unwrap_or(self.nick_refs.len().saturating_sub(1));
+                } else {
+                    self.nick_selected = (self.nick_selected + 1) % self.nick_refs.len();
+                }
+                vec![UiIntent::Event(UiEvent::Tick)]
+            }
+            FocusPane::Input => Vec::new(),
+        }
+    }
+
+    fn open_pm_from_nicklist(&mut self) -> Vec<UiIntent> {
+        let Some(profile) = self.active_profile.clone() else {
+            return Vec::new();
+        };
+        let Some(target) = self.nick_refs.get(self.nick_selected).cloned() else {
+            return Vec::new();
+        };
+        self.focus_pane = FocusPane::Input;
+        vec![UiIntent::SubmitLine(format!("/query {profile} {target}"))]
     }
 
     fn lookup_action(&self, key: KeyEvent) -> Option<String> {
@@ -581,10 +1296,11 @@ impl UiEngine {
             Line::from("Ctrl-H: Toggle help"),
             Line::from("Ctrl-T: Open theme editor"),
             Line::from("Ctrl-Y: Open keymap editor"),
+            Line::from("Ctrl-X: Close focused buffer (with confirmation)"),
             Line::from("Alt-Left / Alt-Right: Cycle buffers"),
             Line::from("Ctrl-A / Ctrl-E: Start/end of input"),
             Line::from("Ctrl-K / Ctrl-U / Ctrl-W: Kill operations"),
-            Line::from("/join /part /msg /connect /disconnect /theme /keymap /quit"),
+            Line::from("/join /part /query /msg /connect /disconnect /theme /keymap /quit"),
         ];
 
         frame.render_widget(
@@ -604,12 +1320,16 @@ impl UiEngine {
             .constraints([Constraint::Length(3), Constraint::Min(3)])
             .split(popup);
 
+        let palette_title = match self.palette_mode {
+            PaletteMode::Normal => "Command Palette",
+            PaletteMode::JoinProfile => "Join: Choose Profile",
+            PaletteMode::JoinChannel { .. } => "Join: Choose Channel",
+            PaletteMode::MsgProfile => "Message: Choose Profile",
+        };
+
         frame.render_widget(
-            Paragraph::new(self.palette.query.clone()).block(
-                Block::default()
-                    .title("Command Palette")
-                    .borders(Borders::ALL),
-            ),
+            Paragraph::new(self.palette.query.clone())
+                .block(Block::default().title(palette_title).borders(Borders::ALL)),
             layout[0],
         );
 
@@ -702,6 +1422,21 @@ impl UiEngine {
             layout[2],
         );
     }
+
+    fn render_close_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let popup = centered_rect(46, 20, area);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new("Close the currently focused buffer? (y/n)")
+                .block(
+                    Block::default()
+                        .title("Confirm Close")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: true }),
+            popup,
+        );
+    }
 }
 
 fn flatten_keymap(keymap: &Keymap) -> HashMap<String, String> {
@@ -740,6 +1475,27 @@ fn parse_color(value: &str) -> Color {
         "darkgray" => Color::DarkGray,
         "white" => Color::White,
         _ => Color::Reset,
+    }
+}
+
+fn border_style(theme: &Theme, focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .fg(parse_color(&theme.palette.accent))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn focus_style(theme: &Theme, focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(parse_color(&theme.palette.accent))
+            .fg(parse_color(&theme.palette.background))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
     }
 }
 

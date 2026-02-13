@@ -30,8 +30,15 @@ use tirc_core::NetworkEvent;
 pub enum NetCommand {
     Raw(String),
     Join(String),
-    Part(String),
-    Privmsg { target: String, body: String },
+    Part {
+        channel: String,
+        reason: Option<String>,
+    },
+    List,
+    Privmsg {
+        target: String,
+        body: String,
+    },
     Nick(String),
     Disconnect,
 }
@@ -39,9 +46,9 @@ pub enum NetCommand {
 /// Networking errors.
 #[derive(Debug, Error)]
 pub enum NetError {
-    #[error("network already connected: {0}")]
+    #[error("profile already connected: {0}")]
     AlreadyConnected(String),
-    #[error("unknown network: {0}")]
+    #[error("unknown profile: {0}")]
     UnknownNetwork(String),
     #[error("channel send failed")]
     ChannelClosed,
@@ -241,11 +248,14 @@ fn apply_offline_command(joined_channels: &mut BTreeSet<String>, command: NetCom
             joined_channels.insert(channel);
             false
         }
-        NetCommand::Part(channel) => {
+        NetCommand::Part { channel, .. } => {
             joined_channels.remove(&channel);
             false
         }
-        NetCommand::Raw(_) | NetCommand::Privmsg { .. } | NetCommand::Nick(_) => false,
+        NetCommand::Raw(_)
+        | NetCommand::Privmsg { .. }
+        | NetCommand::Nick(_)
+        | NetCommand::List => false,
     }
 }
 
@@ -258,13 +268,13 @@ async fn run_live_connection(
 ) -> Result<ConnectionExit, NetError> {
     let (reader_half, mut writer_half) = split(stream);
     let mut reader = BufReader::new(reader_half);
-    let mut line = String::new();
+    let mut line_buf = Vec::with_capacity(1024);
 
     let mut runtime = ConnectionRuntime::new(profile);
     send_registration(&mut writer_half, profile).await?;
 
     loop {
-        line.clear();
+        line_buf.clear();
         tokio::select! {
             maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else {
@@ -281,11 +291,13 @@ async fn run_live_connection(
                     return Ok(ConnectionExit::Requested);
                 }
             }
-            read = reader.read_line(&mut line) => {
+            read = reader.read_until(b'\n', &mut line_buf) => {
                 let count = read?;
                 if count == 0 {
                     return Ok(ConnectionExit::Unexpected("connection closed by server".to_owned()));
                 }
+
+                let line = decode_server_line(&line_buf);
 
                 if let Err(err) = handle_server_line(
                     &line,
@@ -300,6 +312,12 @@ async fn run_live_connection(
             }
         }
     }
+}
+
+fn decode_server_line(raw: &[u8]) -> String {
+    let without_lf = raw.strip_suffix(b"\n").unwrap_or(raw);
+    let trimmed = without_lf.strip_suffix(b"\r").unwrap_or(without_lf);
+    String::from_utf8_lossy(trimmed).into_owned()
 }
 
 async fn send_registration<W: AsyncWrite + Unpin>(
@@ -342,16 +360,19 @@ async fn handle_command<W: AsyncWrite + Unpin>(
                 })
                 .await;
         }
-        NetCommand::Part(channel) => {
+        NetCommand::Part { channel, reason } => {
             joined_channels.remove(&channel);
-            write_command(writer, Command::PART(channel.clone(), None)).await?;
+            write_command(writer, Command::PART(channel.clone(), reason.clone())).await?;
             let _ = events_tx
                 .send(NetworkEvent::Parted {
                     network: network.to_owned(),
                     channel,
-                    reason: Some("manual part".to_owned()),
+                    reason,
                 })
                 .await;
+        }
+        NetCommand::List => {
+            write_command(writer, Command::LIST(None, None)).await?;
         }
         NetCommand::Privmsg { target, body } => {
             write_command(writer, Command::PRIVMSG(target, body)).await?;
@@ -627,6 +648,56 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     })
                     .await;
             }
+        }
+        Response::RPL_LISTSTART => {
+            let _ = events_tx
+                .send(NetworkEvent::ChannelListStart {
+                    network: profile.name.clone(),
+                })
+                .await;
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: "Channel list start".to_owned(),
+                    ts,
+                })
+                .await;
+        }
+        Response::RPL_LIST => {
+            if args.len() >= 4 {
+                let channel = &args[1];
+                let users = args[2].parse::<u32>().unwrap_or(0);
+                let topic = &args[3];
+                let _ = events_tx
+                    .send(NetworkEvent::ChannelListItem {
+                        network: profile.name.clone(),
+                        channel: channel.to_owned(),
+                        users,
+                        topic: topic.to_owned(),
+                    })
+                    .await;
+                let _ = events_tx
+                    .send(NetworkEvent::System {
+                        network: profile.name.clone(),
+                        body: format!("{channel} ({users}) {topic}"),
+                        ts,
+                    })
+                    .await;
+            }
+        }
+        Response::RPL_LISTEND => {
+            let _ = events_tx
+                .send(NetworkEvent::ChannelListEnd {
+                    network: profile.name.clone(),
+                })
+                .await;
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: "Channel list end".to_owned(),
+                    ts,
+                })
+                .await;
         }
         Response::RPL_NAMREPLY => {
             if args.len() >= 4 {

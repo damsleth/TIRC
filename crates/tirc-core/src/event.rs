@@ -37,6 +37,18 @@ pub enum NetworkEvent {
         channel: String,
         nicks: Vec<String>,
     },
+    ChannelListStart {
+        network: String,
+    },
+    ChannelListItem {
+        network: String,
+        channel: String,
+        users: u32,
+        topic: String,
+    },
+    ChannelListEnd {
+        network: String,
+    },
     Message {
         network: String,
         buffer: String,

@@ -78,6 +78,23 @@ impl NetworkState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelListEntry {
+    pub channel: String,
+    pub users: u32,
+    pub topic: String,
+}
+
+impl ChannelListEntry {
+    pub fn new(channel: String, users: u32, topic: String) -> Self {
+        Self {
+            channel,
+            users,
+            topic,
+        }
+    }
+}
+
 /// Command palette state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaletteState {
@@ -111,6 +128,7 @@ pub struct AppState {
     pub help_open: bool,
     pub palette: PaletteState,
     pub max_scrollback_lines: usize,
+    pub channel_list_cache: BTreeMap<String, Vec<ChannelListEntry>>,
     #[serde(skip)]
     status_locked_until: Option<DateTime<Utc>>,
 }
@@ -128,6 +146,7 @@ impl AppState {
             help_open: false,
             palette: PaletteState::default(),
             max_scrollback_lines,
+            channel_list_cache: BTreeMap::new(),
             status_locked_until: None,
         }
     }
@@ -280,6 +299,26 @@ impl AppState {
                     buffer.nicklist = nicks;
                 }
             }
+            NetworkEvent::ChannelListStart { network } => {
+                self.channel_list_cache.insert(network, Vec::new());
+            }
+            NetworkEvent::ChannelListItem {
+                network,
+                channel,
+                users,
+                topic,
+            } => {
+                let entries = self.channel_list_cache.entry(network).or_default();
+                if let Some(existing) = entries.iter_mut().find(|entry| entry.channel == channel) {
+                    existing.users = users;
+                    existing.topic = topic;
+                } else {
+                    entries.push(ChannelListEntry::new(channel, users, topic));
+                }
+            }
+            NetworkEvent::ChannelListEnd { network } => {
+                self.channel_list_cache.entry(network).or_default();
+            }
             NetworkEvent::Message {
                 network,
                 buffer,
@@ -406,6 +445,7 @@ impl AppState {
             input: self.input.clone(),
             warnings: self.warnings.clone(),
             palette: self.palette.clone(),
+            channel_list_cache: self.channel_list_cache.clone(),
             help_open: self.help_open,
         }
     }
@@ -421,6 +461,7 @@ pub struct AppViewModel {
     pub input: String,
     pub warnings: Vec<String>,
     pub palette: PaletteState,
+    pub channel_list_cache: BTreeMap<String, Vec<ChannelListEntry>>,
     pub help_open: bool,
 }
 

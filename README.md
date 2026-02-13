@@ -38,7 +38,7 @@ TIRC uses XDG-style paths:
 - Themes: `~/.config/tirc/themes/*.toml`
 - Keymaps: `~/.config/tirc/keymaps/*.toml`
 - Session: `~/.local/state/tirc/session.json`
-- Logs: `~/.local/state/tirc/logs/<network>/<buffer>/<YYYY-MM-DD>.jsonl`
+- Logs: `~/.local/state/tirc/logs/<profile>/<buffer>/<YYYY-MM-DD>.jsonl`
 - Cache: `~/.cache/tirc`
 
 ## Security Notes

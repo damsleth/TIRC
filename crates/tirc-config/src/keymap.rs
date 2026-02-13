@@ -25,6 +25,7 @@ impl Default for Keymap {
                 KeyBinding::new("ctrl-p", "palette.toggle"),
                 KeyBinding::new("ctrl-h", "help.toggle"),
                 KeyBinding::new("ctrl-c", "app.quit"),
+                KeyBinding::new("ctrl-x", "buffer.close.confirm"),
                 KeyBinding::new("ctrl-t", "theme.editor.toggle"),
                 KeyBinding::new("ctrl-y", "keymap.editor.toggle"),
                 KeyBinding::new("alt-left", "buffer.prev"),

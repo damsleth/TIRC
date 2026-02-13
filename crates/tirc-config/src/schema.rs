@@ -120,6 +120,8 @@ impl Default for PerformanceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerProfile {
     pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub host: String,
     pub port: u16,
     pub tls: bool,
@@ -215,6 +217,7 @@ fn write_default_config(path: &Path) -> Result<(), ConfigError> {
 fn sample_profile() -> ServerProfile {
     ServerProfile {
         name: "default".to_owned(),
+        enabled: true,
         host: "irc.homelien.no".to_owned(),
         port: 6666,
         tls: false,
@@ -225,6 +228,10 @@ fn sample_profile() -> ServerProfile {
         autojoin: Vec::new(),
         secret: None,
     }
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -254,6 +261,7 @@ mod tests {
         assert_eq!(loaded.config.ui.theme, "tirc-default");
         assert_eq!(loaded.config.profiles.len(), 1);
         assert_eq!(loaded.config.profiles[0].name, "default");
+        assert!(loaded.config.profiles[0].enabled);
         assert_eq!(loaded.config.profiles[0].host, "irc.homelien.no");
         assert_eq!(loaded.config.profiles[0].port, 6666);
     }
