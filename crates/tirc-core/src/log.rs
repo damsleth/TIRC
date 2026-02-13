@@ -33,22 +33,32 @@ pub enum LogError {
 pub struct LogWriter {
     root: PathBuf,
     retention_days: u16,
+    redact_secrets: bool,
 }
 
 impl LogWriter {
-    pub fn new(root: impl Into<PathBuf>, retention_days: u16) -> Self {
+    pub fn new(root: impl Into<PathBuf>, retention_days: u16, redact_secrets: bool) -> Self {
         Self {
             root: root.into(),
             retention_days,
+            redact_secrets,
         }
     }
 
     pub async fn append(&self, record: &LogRecord) -> Result<PathBuf, LogError> {
-        let date = record.ts.date_naive();
+        let record_to_write = if self.redact_secrets {
+            let mut redacted = record.clone();
+            redacted.body = redact_sensitive_content(&record.body);
+            redacted
+        } else {
+            record.clone()
+        };
+        
+        let date = record_to_write.ts.date_naive();
         let file = self
             .root
-            .join(sanitize(&record.network))
-            .join(sanitize(&record.buffer))
+            .join(sanitize(&record_to_write.network))
+            .join(sanitize(&record_to_write.buffer))
             .join(format!(
                 "{:04}-{:02}-{:02}.jsonl",
                 date.year(),
@@ -60,7 +70,7 @@ impl LogWriter {
             fs::create_dir_all(parent).await?;
         }
 
-        let line = serde_json::to_string(record)?;
+        let line = serde_json::to_string(&record_to_write)?;
         let handle = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -121,4 +131,123 @@ fn sanitize(value: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Redact sensitive content from log messages.
+/// 
+/// Patterns redacted:
+/// - `/msg nickserv identify <password>` -> `/msg nickserv identify [REDACTED]`
+/// - `/ns identify <password>` -> `/ns identify [REDACTED]`
+/// - `AUTHENTICATE <payload>` -> `AUTHENTICATE [REDACTED]`
+/// - Various password patterns
+fn redact_sensitive_content(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
+    
+    // Check for NickServ/NS identify patterns
+    if lower.contains("identify") || lower.contains("register") {
+        // Pattern: /msg nickserv identify <password>
+        // Pattern: /ns identify <password>
+        // Pattern: identify <password>
+        let patterns = [
+            "nickserv identify ",
+            "nickserv register ",
+            "ns identify ",
+            "ns register ",
+            "/identify ",
+            " identify ",
+        ];
+        
+        for pattern in patterns {
+            if let Some(pos) = lower.find(pattern) {
+                let start = pos + pattern.len();
+                // Find end of password (next space or end of string)
+                let password_end = body[start..]
+                    .find(|c: char| c.is_whitespace())
+                    .map(|p| start + p)
+                    .unwrap_or(body.len());
+                
+                if password_end > start {
+                    let mut result = body[..start].to_owned();
+                    result.push_str("[REDACTED]");
+                    if password_end < body.len() {
+                        result.push_str(&body[password_end..]);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    
+    // SASL AUTHENTICATE payload
+    if lower.starts_with("authenticate ") && body.len() > 13 {
+        return "AUTHENTICATE [REDACTED]".to_owned();
+    }
+    
+    // Check for password= or password: patterns  
+    if lower.contains("password") {
+        let patterns = ["password=", "password:", "password "];
+        for pattern in patterns {
+            if let Some(pos) = lower.find(pattern) {
+                let start = pos + pattern.len();
+                let password_end = body[start..]
+                    .find(|c: char| c.is_whitespace() || c == '&' || c == ';')
+                    .map(|p| start + p)
+                    .unwrap_or(body.len());
+                
+                if password_end > start {
+                    let mut result = body[..start].to_owned();
+                    result.push_str("[REDACTED]");
+                    if password_end < body.len() {
+                        result.push_str(&body[password_end..]);
+                    }
+                    return result;
+                }
+            }
+        }
+    }
+    
+    body.to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_nickserv_identify() {
+        assert_eq!(
+            redact_sensitive_content("/msg nickserv identify mypassword"),
+            "/msg nickserv identify [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_redact_ns_identify() {
+        assert_eq!(
+            redact_sensitive_content("/ns identify secretpass"),
+            "/ns identify [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_redact_authenticate() {
+        assert_eq!(
+            redact_sensitive_content("AUTHENTICATE AGJvdABteXNlY3JldA=="),
+            "AUTHENTICATE [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_no_redaction_normal_message() {
+        let msg = "Hello everyone, how are you today?";
+        assert_eq!(redact_sensitive_content(msg), msg);
+    }
+
+    #[test]
+    fn test_redact_password_equals() {
+        assert_eq!(
+            redact_sensitive_content("some config password=secret123 other"),
+            "some config password=[REDACTED] other"
+        );
+    }
 }

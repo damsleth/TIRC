@@ -109,6 +109,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let logger = LogWriter::new(
         paths.logs_dir.clone(),
         runtime_config.logging.retention_days,
+        runtime_config.logging.redact_secrets,
     );
 
     let (net_event_tx, mut net_event_rx) = mpsc::channel::<NetworkEvent>(1_024);
