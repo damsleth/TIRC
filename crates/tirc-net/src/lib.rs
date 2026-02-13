@@ -603,6 +603,23 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                     .await;
             }
         }
+        Command::KICK(channel, kicked_nick, reason) => {
+            let was_self = kicked_nick == runtime.current_nick;
+            // If we were kicked, remove from joined channels
+            if was_self {
+                joined_channels.remove(&channel);
+            }
+            let _ = events_tx
+                .send(NetworkEvent::Kicked {
+                    network: profile.name.clone(),
+                    channel,
+                    kicked_nick,
+                    by_nick: source_nick,
+                    reason,
+                    was_self,
+                })
+                .await;
+        }
         Command::CAP(_, subcommand, _, params) => {
             handle_cap_message(subcommand, params, profile, runtime, writer, events_tx).await?;
         }

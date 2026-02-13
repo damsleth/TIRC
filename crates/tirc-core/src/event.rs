@@ -97,6 +97,16 @@ pub enum NetworkEvent {
         reason: Option<String>,
         channels: Vec<String>,
     },
+    /// A user was kicked from a channel
+    Kicked {
+        network: String,
+        channel: String,
+        kicked_nick: String,
+        by_nick: Option<String>,
+        reason: Option<String>,
+        /// True if we were the one kicked
+        was_self: bool,
+    },
     NickList {
         network: String,
         channel: String,

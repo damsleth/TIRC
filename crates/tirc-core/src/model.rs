@@ -341,6 +341,56 @@ impl AppState {
                     buffer.nicklist = nicks;
                 }
             }
+            NetworkEvent::Kicked {
+                network,
+                channel,
+                kicked_nick,
+                by_nick,
+                reason,
+                was_self,
+            } => {
+                let kick_msg = match (&by_nick, &reason) {
+                    (Some(by), Some(r)) => format!("{kicked_nick} was kicked by {by} ({r})"),
+                    (Some(by), None) => format!("{kicked_nick} was kicked by {by}"),
+                    (None, Some(r)) => format!("{kicked_nick} was kicked ({r})"),
+                    (None, None) => format!("{kicked_nick} was kicked"),
+                };
+                
+                let id = BufferId {
+                    network: network.clone(),
+                    name: channel.clone(),
+                };
+                
+                if let Some(buffer) = self.buffers.get_mut(&id) {
+                    // Remove kicked user from nicklist
+                    buffer.nicklist.retain(|n| {
+                        let plain_nick = n.trim_start_matches(&['@', '+', '%', '&', '~'][..]);
+                        plain_nick != kicked_nick
+                    });
+                    
+                    // Post kick message
+                    buffer.messages.push_back(Message {
+                        ts: Utc::now(),
+                        sender: None,
+                        body: kick_msg,
+                        mention: false,
+                        tags: BTreeMap::new(),
+                    });
+                    
+                    // Enforce scrollback limit
+                    while buffer.messages.len() > self.max_scrollback_lines {
+                        buffer.messages.pop_front();
+                    }
+                }
+                
+                // If we were kicked, remove channel and set status
+                if was_self {
+                    if let Some(net_state) = self.networks.get_mut(&network) {
+                        net_state.channels.remove(&channel);
+                    }
+                    self.set_status(format!("Kicked from {channel}"));
+                }
+            }
             NetworkEvent::ChannelListStart { network } => {
                 self.channel_list_cache.insert(network, Vec::new());
             }
