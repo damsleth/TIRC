@@ -21,6 +21,73 @@ use crate::{input::InputEditor, palette::PaletteEngine};
 pub enum UiIntent {
     Event(UiEvent),
     SubmitLine(String),
+    ApplyTheme(String),
+    ApplyKeymap(String),
+}
+
+#[derive(Debug, Clone, Default)]
+struct SelectionEditor {
+    open: bool,
+    options: Vec<String>,
+    selected: usize,
+    active: String,
+}
+
+impl SelectionEditor {
+    fn with_options(options: Vec<String>, active: String) -> Self {
+        let selected = options
+            .iter()
+            .position(|option| option == &active)
+            .unwrap_or(0);
+
+        Self {
+            open: false,
+            options,
+            selected,
+            active,
+        }
+    }
+
+    fn set_options(&mut self, options: Vec<String>, active: String) {
+        self.options = options;
+        self.active = active;
+        self.selected = self
+            .options
+            .iter()
+            .position(|option| option == &self.active)
+            .unwrap_or(0);
+    }
+
+    fn move_up(&mut self) {
+        if self.options.is_empty() {
+            self.selected = 0;
+            return;
+        }
+
+        if self.selected == 0 {
+            self.selected = self.options.len() - 1;
+        } else {
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.options.is_empty() {
+            self.selected = 0;
+            return;
+        }
+
+        self.selected = (self.selected + 1) % self.options.len();
+    }
+
+    fn selected_value(&self) -> Option<String> {
+        self.options.get(self.selected).cloned()
+    }
+}
+
+enum EditorKind {
+    Theme,
+    Keymap,
 }
 
 /// Stateful ratatui engine for rendering and keyboard handling.
@@ -30,12 +97,24 @@ pub struct UiEngine {
     input: InputEditor,
     pub palette_open: bool,
     palette: PaletteEngine,
+    theme_editor: SelectionEditor,
+    keymap_editor: SelectionEditor,
     last_draw: Instant,
     idle_hz: u8,
 }
 
 impl UiEngine {
-    pub fn new(theme: Theme, keymap: Keymap, palette_items: Vec<String>, idle_hz: u8) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        theme: Theme,
+        keymap: Keymap,
+        palette_items: Vec<String>,
+        idle_hz: u8,
+        theme_options: Vec<String>,
+        active_theme: String,
+        keymap_options: Vec<String>,
+        active_keymap: String,
+    ) -> Self {
         let keymap_actions = flatten_keymap(&keymap);
 
         Self {
@@ -44,13 +123,45 @@ impl UiEngine {
             input: InputEditor::default(),
             palette_open: false,
             palette: PaletteEngine::new(palette_items),
+            theme_editor: SelectionEditor::with_options(theme_options, active_theme),
+            keymap_editor: SelectionEditor::with_options(keymap_options, active_keymap),
             last_draw: Instant::now(),
             idle_hz,
         }
     }
 
-    pub fn set_theme(&mut self, theme: Theme) {
+    pub fn set_theme(&mut self, theme: Theme, name: String) {
         self.theme = theme;
+        self.theme_editor.active = name.clone();
+        if let Some(pos) = self
+            .theme_editor
+            .options
+            .iter()
+            .position(|option| option == &name)
+        {
+            self.theme_editor.selected = pos;
+        }
+    }
+
+    pub fn set_keymap(&mut self, keymap: &Keymap, name: String) {
+        self.keymap_actions = flatten_keymap(keymap);
+        self.keymap_editor.active = name.clone();
+        if let Some(pos) = self
+            .keymap_editor
+            .options
+            .iter()
+            .position(|option| option == &name)
+        {
+            self.keymap_editor.selected = pos;
+        }
+    }
+
+    pub fn set_theme_options(&mut self, options: Vec<String>, active: String) {
+        self.theme_editor.set_options(options, active);
+    }
+
+    pub fn set_keymap_options(&mut self, options: Vec<String>, active: String) {
+        self.keymap_editor.set_options(options, active);
     }
 
     pub fn set_palette_items(&mut self, items: Vec<String>) {
@@ -212,6 +323,14 @@ impl UiEngine {
         if self.palette_open {
             self.render_palette(frame, area);
         }
+
+        if self.theme_editor.open {
+            self.render_selection_editor(frame, area, "Theme Editor", &self.theme_editor);
+        }
+
+        if self.keymap_editor.open {
+            self.render_selection_editor(frame, area, "Keymap Editor", &self.keymap_editor);
+        }
     }
 
     pub fn handle_terminal_event(&mut self, event: Event) -> Vec<UiIntent> {
@@ -231,6 +350,14 @@ impl UiEngine {
 
         if self.palette_open {
             return self.handle_palette_key(key);
+        }
+
+        if self.theme_editor.open {
+            return self.handle_selection_editor_key(EditorKind::Theme, key);
+        }
+
+        if self.keymap_editor.open {
+            return self.handle_selection_editor_key(EditorKind::Keymap, key);
         }
 
         if let Some(action) = self.lookup_action(key) {
@@ -327,6 +454,40 @@ impl UiEngine {
         }
     }
 
+    fn handle_selection_editor_key(&mut self, kind: EditorKind, key: KeyEvent) -> Vec<UiIntent> {
+        let editor = match kind {
+            EditorKind::Theme => &mut self.theme_editor,
+            EditorKind::Keymap => &mut self.keymap_editor,
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.open = false;
+                Vec::new()
+            }
+            KeyCode::Up => {
+                editor.move_up();
+                Vec::new()
+            }
+            KeyCode::Down => {
+                editor.move_down();
+                Vec::new()
+            }
+            KeyCode::Enter => {
+                editor.open = false;
+                if let Some(selected) = editor.selected_value() {
+                    match kind {
+                        EditorKind::Theme => vec![UiIntent::ApplyTheme(selected)],
+                        EditorKind::Keymap => vec![UiIntent::ApplyKeymap(selected)],
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
     fn handle_action(&mut self, action: &str) -> Vec<UiIntent> {
         match action {
             "palette.toggle" => {
@@ -334,6 +495,20 @@ impl UiEngine {
                 if self.palette_open {
                     self.palette.clear_query();
                 }
+                self.theme_editor.open = false;
+                self.keymap_editor.open = false;
+                vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
+            }
+            "theme.editor.toggle" => {
+                self.theme_editor.open = !self.theme_editor.open;
+                self.keymap_editor.open = false;
+                self.palette_open = false;
+                vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
+            }
+            "keymap.editor.toggle" => {
+                self.keymap_editor.open = !self.keymap_editor.open;
+                self.theme_editor.open = false;
+                self.palette_open = false;
                 vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
             }
             "input.home" => {
@@ -379,10 +554,12 @@ impl UiEngine {
             Line::from("TIRC Help"),
             Line::from(""),
             Line::from("Ctrl-P: Open command palette"),
+            Line::from("Ctrl-T: Open theme editor"),
+            Line::from("Ctrl-Y: Open keymap editor"),
             Line::from("Alt-Left / Alt-Right: Cycle buffers"),
             Line::from("Ctrl-A / Ctrl-E: Start/end of input"),
             Line::from("Ctrl-K / Ctrl-U / Ctrl-W: Kill operations"),
-            Line::from("/join /part /msg /connect /disconnect /quit"),
+            Line::from("/join /part /msg /connect /disconnect /theme /keymap /quit"),
         ];
 
         frame.render_widget(
@@ -435,6 +612,69 @@ impl UiEngine {
         frame.render_widget(
             List::new(items).block(Block::default().title("Actions").borders(Borders::ALL)),
             layout[1],
+        );
+    }
+
+    fn render_selection_editor(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        editor: &SelectionEditor,
+    ) {
+        let popup = centered_rect(60, 60, area);
+        frame.render_widget(Clear, popup);
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(4),
+                Constraint::Length(1),
+            ])
+            .split(popup);
+
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Current: {} | Up/Down select | Enter apply | Esc close",
+                editor.active
+            ))
+            .block(Block::default().title(title).borders(Borders::ALL)),
+            layout[0],
+        );
+
+        let items = editor
+            .options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                let mut label = option.clone();
+                if option == &editor.active {
+                    label.push_str(" (active)");
+                }
+
+                if index == editor.selected {
+                    ListItem::new(Line::from(Span::styled(
+                        label,
+                        Style::default()
+                            .bg(parse_color(&self.theme.palette.accent))
+                            .fg(parse_color(&self.theme.palette.background))
+                            .add_modifier(Modifier::BOLD),
+                    )))
+                } else {
+                    ListItem::new(label)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        frame.render_widget(
+            List::new(items).block(Block::default().title("Available").borders(Borders::ALL)),
+            layout[1],
+        );
+
+        frame.render_widget(
+            Paragraph::new("Changes apply immediately and are persisted to config.toml"),
+            layout[2],
         );
     }
 }

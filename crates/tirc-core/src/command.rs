@@ -112,6 +112,18 @@ impl CommandRegistry {
                 help: "Focus buffer",
             },
             CommandSpec {
+                id: "theme",
+                aliases: &["th"],
+                args: "",
+                help: "Open theme editor",
+            },
+            CommandSpec {
+                id: "keymap",
+                aliases: &["km"],
+                args: "",
+                help: "Open keymap editor",
+            },
+            CommandSpec {
                 id: "quit",
                 aliases: &["q"],
                 args: "",
@@ -270,6 +282,24 @@ impl CommandRegistry {
                         .push(failed("buffer", "usage: /buffer <network> <name>"));
                 }
             }
+            "theme" => {
+                out.events.push(AppEvent::Ui(UiEvent::Action(
+                    "theme.editor.toggle".to_owned(),
+                )));
+                out.events.push(AppEvent::Command(CommandEvent::Succeeded {
+                    command,
+                    detail: "Theme editor opened".to_owned(),
+                }));
+            }
+            "keymap" => {
+                out.events.push(AppEvent::Ui(UiEvent::Action(
+                    "keymap.editor.toggle".to_owned(),
+                )));
+                out.events.push(AppEvent::Command(CommandEvent::Succeeded {
+                    command,
+                    detail: "Keymap editor opened".to_owned(),
+                }));
+            }
             "quit" => {
                 state.should_quit = true;
                 out.events.push(AppEvent::Ui(UiEvent::QuitRequested));
@@ -349,5 +379,19 @@ mod tests {
                 .iter()
                 .any(|event| { matches!(event, AppEvent::Ui(UiEvent::QuitRequested)) })
         );
+    }
+
+    #[test]
+    fn theme_command_opens_editor() {
+        let registry = CommandRegistry::default_registry();
+        let mut state = AppState::new(100);
+        let output = registry.execute_line(&mut state, CommandSource::Slash, "/theme");
+
+        assert!(output.events.iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::Ui(UiEvent::Action(action)) if action == "theme.editor.toggle"
+            )
+        }));
     }
 }

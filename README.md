@@ -8,9 +8,11 @@ TIRC ("turk") is a fast, opinionated, batteries-included terminal IRC client wri
 - IRCv3 baseline support (CAP negotiation, SASL PLAIN, message tags, `server-time`, `echo-message`, `batch`).
 - `Ctrl-P` command palette with fuzzy filtering.
 - Unified slash + palette command execution.
+- Theme editor (`Ctrl-T`, `/theme`) and keymap editor (`Ctrl-Y`, `/keymap`) overlays.
 - Theme and keymap customization via TOML.
 - Session restore + JSONL chat logging with retention.
 - Terminal bell + macOS notifications.
+- First-run config generation with a starter Libera profile.
 
 ## Install (development)
 

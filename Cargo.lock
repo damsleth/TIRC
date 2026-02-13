@@ -2388,6 +2388,7 @@ dependencies = [
 name = "tirc-net"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64",
  "chrono",
  "futures",

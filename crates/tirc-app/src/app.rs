@@ -11,7 +11,10 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
-use tirc_config::{AppPaths, LoadedConfig, ServerProfile, load_config, load_keymap, load_theme};
+use tirc_config::{
+    AppPaths, LoadedConfig, ServerProfile, available_keymaps, available_themes, load_config,
+    load_keymap, load_theme, save_config,
+};
 use tirc_core::{
     AppEvent, CommandEvent, CommandRegistry, CommandSource, LogRecord, LogWriter, NetworkEvent,
     TimerEvent, UiEvent, build_session_snapshot, load_session, save_session,
@@ -32,7 +35,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         warning_plaintext_secret,
     } = load_config(&paths, cli.config.as_deref())?;
 
-    let mut state = tirc_core::AppState::new(config.ui.max_scrollback_lines);
+    let mut runtime_config = config;
+    let mut state = tirc_core::AppState::new(runtime_config.ui.max_scrollback_lines);
     if warning_plaintext_secret {
         state
             .warnings
@@ -40,8 +44,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         state.status = "Warning: plaintext credentials detected".to_owned();
     }
 
-    let theme = load_theme(&paths.themes_dir, &config.ui.theme)?;
-    let keymap = load_keymap(&paths.keymaps_dir, &config.keymap.active_map)?;
+    let theme = load_theme(&paths.themes_dir, &runtime_config.ui.theme)?;
+    let keymap = load_keymap(&paths.keymaps_dir, &runtime_config.keymap.active_map)?;
+    let theme_options = available_themes(&paths.themes_dir)?;
+    let keymap_options = available_keymaps(&paths.keymaps_dir)?;
 
     if !cli.no_restore {
         restore_session(&paths.session_file, &mut state).await?;
@@ -51,23 +57,34 @@ pub async fn run(cli: Cli) -> Result<()> {
     let mut ui = UiEngine::new(
         theme,
         keymap,
-        build_palette_items(&state, &command_registry, &config.profiles),
-        config.performance.max_idle_redraw_hz,
+        build_palette_items(&state, &command_registry, &runtime_config.profiles),
+        runtime_config.performance.max_idle_redraw_hz,
+        theme_options,
+        runtime_config.ui.theme.clone(),
+        keymap_options,
+        runtime_config.keymap.active_map.clone(),
     );
 
     let notifier = PlatformNotifier {
-        enable_bell: config.notifications.bell_on_mention
-            || config.notifications.bell_on_private_message,
-        enable_macos_notifications: config.notifications.macos_notifications,
+        enable_bell: runtime_config.notifications.bell_on_mention
+            || runtime_config.notifications.bell_on_private_message,
+        enable_macos_notifications: runtime_config.notifications.macos_notifications,
     };
 
-    let logger = LogWriter::new(paths.logs_dir.clone(), config.logging.retention_days);
+    let logger = LogWriter::new(
+        paths.logs_dir.clone(),
+        runtime_config.logging.retention_days,
+    );
 
     let (net_event_tx, mut net_event_rx) = mpsc::channel::<NetworkEvent>(1_024);
     let mut net_manager = NetManager::new(net_event_tx);
 
     if let Some(profile_name) = cli.profile.as_ref() {
-        if let Some(profile) = config.profiles.iter().find(|p| p.name == *profile_name) {
+        if let Some(profile) = runtime_config
+            .profiles
+            .iter()
+            .find(|profile| profile.name == *profile_name)
+        {
             net_manager.connect_profile(profile.clone()).await?;
             state.status = format!("Connecting profile: {profile_name}");
         } else {
@@ -92,8 +109,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 &mut state,
                 &notifier,
                 &logger,
-                config.logging.enabled,
-                &config,
+                runtime_config.logging.enabled,
+                &runtime_config,
             )
             .await;
             needs_draw = true;
@@ -106,11 +123,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                 handle_ui_intents(
                     intents,
                     &mut state,
+                    &mut ui,
                     &mut net_manager,
                     &command_registry,
-                    &config.profiles,
+                    &paths,
+                    &mut runtime_config,
                     &logger,
-                    config.logging.enabled,
                 )
                 .await;
                 needs_draw = true;
@@ -141,7 +159,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             ui.set_palette_items(build_palette_items(
                 &state,
                 &command_registry,
-                &config.profiles,
+                &runtime_config.profiles,
             ));
             let vm = state.view_model();
             ui.sync_input(&vm.input);
@@ -223,11 +241,12 @@ async fn process_network_event(
 async fn handle_ui_intents(
     intents: Vec<UiIntent>,
     state: &mut tirc_core::AppState,
+    ui: &mut UiEngine,
     net_manager: &mut NetManager,
     command_registry: &CommandRegistry,
-    profiles: &[ServerProfile],
+    paths: &AppPaths,
+    runtime_config: &mut tirc_config::AppConfig,
     logger: &LogWriter,
-    logging_enabled: bool,
 ) {
     for intent in intents {
         match intent {
@@ -239,7 +258,7 @@ async fn handle_ui_intents(
                         state,
                         net_manager,
                         command_registry,
-                        profiles,
+                        &runtime_config.profiles,
                     )
                     .await;
                 }
@@ -257,13 +276,56 @@ async fn handle_ui_intents(
                         state,
                         net_manager,
                         command_registry,
-                        profiles,
+                        &runtime_config.profiles,
                     )
                     .await;
                 } else {
-                    send_chat_line(line, state, net_manager, logger, logging_enabled).await;
+                    send_chat_line(
+                        line,
+                        state,
+                        net_manager,
+                        logger,
+                        runtime_config.logging.enabled,
+                    )
+                    .await;
                 }
             }
+            UiIntent::ApplyTheme(name) => match load_theme(&paths.themes_dir, &name) {
+                Ok(theme) => {
+                    ui.set_theme(theme, name.clone());
+                    runtime_config.ui.theme = name.clone();
+                    if let Err(err) = save_config(&paths.config_file, runtime_config) {
+                        state.status = format!("failed to persist theme: {err}");
+                    } else {
+                        state.status = format!("theme set: {name}");
+                    }
+
+                    if let Ok(options) = available_themes(&paths.themes_dir) {
+                        ui.set_theme_options(options, runtime_config.ui.theme.clone());
+                    }
+                }
+                Err(err) => {
+                    state.status = format!("failed to load theme {name}: {err}");
+                }
+            },
+            UiIntent::ApplyKeymap(name) => match load_keymap(&paths.keymaps_dir, &name) {
+                Ok(keymap) => {
+                    ui.set_keymap(&keymap, name.clone());
+                    runtime_config.keymap.active_map = name.clone();
+                    if let Err(err) = save_config(&paths.config_file, runtime_config) {
+                        state.status = format!("failed to persist keymap: {err}");
+                    } else {
+                        state.status = format!("keymap set: {name}");
+                    }
+
+                    if let Ok(options) = available_keymaps(&paths.keymaps_dir) {
+                        ui.set_keymap_options(options, runtime_config.keymap.active_map.clone());
+                    }
+                }
+                Err(err) => {
+                    state.status = format!("failed to load keymap {name}: {err}");
+                }
+            },
         }
     }
 }

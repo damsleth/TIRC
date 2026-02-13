@@ -29,7 +29,7 @@ impl Default for AppConfig {
             ui: UiConfig::default(),
             keymap: KeymapConfig::default(),
             logging: LoggingConfig::default(),
-            profiles: Vec::new(),
+            profiles: vec![sample_profile()],
             notifications: NotificationConfig::default(),
             performance: PerformanceConfig::default(),
         }
@@ -212,6 +212,21 @@ fn write_default_config(path: &Path) -> Result<(), ConfigError> {
     save_config(path, &cfg)
 }
 
+fn sample_profile() -> ServerProfile {
+    ServerProfile {
+        name: "libera".to_owned(),
+        host: "irc.libera.chat".to_owned(),
+        port: 6697,
+        tls: true,
+        nick: "tirc_user".to_owned(),
+        user: "tirc".to_owned(),
+        realname: "TIRC User".to_owned(),
+        sasl: None,
+        autojoin: vec!["#rust".to_owned()],
+        secret: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -237,6 +252,8 @@ mod tests {
         let loaded = load_config(&paths, Some(&config_file)).expect("load config");
         assert!(config_file.exists());
         assert_eq!(loaded.config.ui.theme, "tirc-default");
+        assert_eq!(loaded.config.profiles.len(), 1);
+        assert_eq!(loaded.config.profiles[0].name, "libera");
     }
 
     #[cfg(unix)]

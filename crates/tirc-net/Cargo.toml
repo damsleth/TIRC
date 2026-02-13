@@ -22,3 +22,6 @@ serde.workspace = true
 chrono.workspace = true
 tirc-config = { path = "../tirc-config" }
 tirc-core = { path = "../tirc-core" }
+
+[dev-dependencies]
+anyhow.workspace = true

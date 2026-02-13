@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -23,6 +24,8 @@ impl Default for Keymap {
             global: vec![
                 KeyBinding::new("ctrl-p", "palette.toggle"),
                 KeyBinding::new("ctrl-c", "app.quit"),
+                KeyBinding::new("ctrl-t", "theme.editor.toggle"),
+                KeyBinding::new("ctrl-y", "keymap.editor.toggle"),
                 KeyBinding::new("alt-left", "buffer.prev"),
                 KeyBinding::new("alt-right", "buffer.next"),
             ],
@@ -88,4 +91,26 @@ pub fn save_keymap(
     let serialized = toml::to_string_pretty(keymap)?;
     file.write_all(serialized.as_bytes())?;
     Ok(path)
+}
+
+/// Returns available keymap names from built-ins and local files.
+pub fn available_keymaps(keymaps_dir: &Path) -> Result<Vec<String>, ConfigError> {
+    let mut names = BTreeSet::new();
+    names.insert("default".to_owned());
+
+    if keymaps_dir.exists() {
+        for entry in fs::read_dir(keymaps_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.insert(stem.to_owned());
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
 }

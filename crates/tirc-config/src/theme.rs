@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -100,6 +100,26 @@ pub fn save_theme(themes_dir: &Path, theme: &Theme) -> Result<PathBuf, ConfigErr
     let mut file = fs::File::create(&path)?;
     file.write_all(serialized.as_bytes())?;
     Ok(path)
+}
+
+/// Returns available theme names from built-ins and local files.
+pub fn available_themes(themes_dir: &Path) -> Result<Vec<String>, ConfigError> {
+    let mut names = built_in_themes().into_keys().collect::<BTreeSet<_>>();
+    if themes_dir.exists() {
+        for entry in fs::read_dir(themes_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                names.insert(stem.to_owned());
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
 }
 
 fn built_in_themes() -> BTreeMap<String, Theme> {
