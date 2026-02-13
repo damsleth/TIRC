@@ -56,6 +56,8 @@ pub enum NetError {
     Io(#[from] std::io::Error),
     #[error("tls error: {0}")]
     Tls(#[from] tokio_native_tls::native_tls::Error),
+    #[error("too many nick collisions, giving up")]
+    TooManyNickCollisions,
 }
 
 struct ConnectionHandle {
@@ -133,6 +135,8 @@ struct ConnectionRuntime {
     requested_caps: BTreeSet<String>,
     acked_caps: BTreeSet<String>,
     current_nick: String,
+    original_nick: String,
+    nick_collision_count: u8,
     registration_complete: bool,
     sasl_in_progress: bool,
     sasl_done: bool,
@@ -144,6 +148,8 @@ impl ConnectionRuntime {
             requested_caps: BTreeSet::new(),
             acked_caps: BTreeSet::new(),
             current_nick: profile.nick.clone(),
+            original_nick: profile.nick.clone(),
+            nick_collision_count: 0,
             registration_complete: false,
             sasl_in_progress: false,
             sasl_done: profile.sasl.is_none(),
@@ -299,15 +305,25 @@ async fn run_live_connection(
 
                 let line = decode_server_line(&line_buf);
 
-                if let Err(err) = handle_server_line(
+                let result = handle_server_line(
                     &line,
                     profile,
                     &mut runtime,
                     &mut writer_half,
                     events_tx,
                     joined_channels,
-                ).await {
-                    warn!(network = profile.name, "failed to process incoming line: {err}");
+                ).await;
+                
+                match result {
+                    Ok(()) => {}
+                    Err(NetError::TooManyNickCollisions) => {
+                        return Ok(ConnectionExit::Unexpected(
+                            "too many nick collisions".to_owned()
+                        ));
+                    }
+                    Err(err) => {
+                        warn!(network = profile.name, "failed to process incoming line: {err}");
+                    }
                 }
             }
         }
@@ -753,12 +769,50 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                 .await;
         }
         Response::ERR_NICKNAMEINUSE => {
-            let fallback = format!(
-                "{}{}",
-                runtime.current_nick,
-                rand::rng().random_range(1..99)
-            );
+            const MAX_NICK_COLLISIONS: u8 = 5;
+            const MAX_NICK_LENGTH: usize = 16;
+            
+            runtime.nick_collision_count += 1;
+            
+            if runtime.nick_collision_count > MAX_NICK_COLLISIONS {
+                let _ = events_tx
+                    .send(NetworkEvent::System {
+                        network: profile.name.clone(),
+                        body: format!(
+                            "Too many nick collisions ({MAX_NICK_COLLISIONS}), disconnecting"
+                        ),
+                        ts,
+                    })
+                    .await;
+                return Err(NetError::TooManyNickCollisions);
+            }
+            
+            // Use underscore suffix pattern: nick, nick_, nick_1, nick_2, etc.
+            let suffix = if runtime.nick_collision_count == 1 {
+                "_".to_owned()
+            } else {
+                format!("_{}", runtime.nick_collision_count - 1)
+            };
+            
+            // Truncate base nick if resulting nick would exceed max length
+            let max_base_len = MAX_NICK_LENGTH.saturating_sub(suffix.len());
+            let base = if runtime.original_nick.len() > max_base_len {
+                &runtime.original_nick[..max_base_len]
+            } else {
+                &runtime.original_nick
+            };
+            
+            let fallback = format!("{base}{suffix}");
             runtime.current_nick = fallback.clone();
+            
+            let _ = events_tx
+                .send(NetworkEvent::System {
+                    network: profile.name.clone(),
+                    body: format!("Nick in use, trying {fallback}"),
+                    ts,
+                })
+                .await;
+            
             write_command(writer, Command::NICK(fallback)).await?;
         }
         Response::ERR_NOTREGISTERED
