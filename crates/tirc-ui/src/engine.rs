@@ -146,6 +146,11 @@ pub struct UiEngine {
     help_open: bool,
     last_draw: Instant,
     idle_hz: u8,
+    // Dirty tracking for performance
+    last_network_count: usize,
+    last_connected_count: usize,
+    last_buffer_count: usize,
+    last_channel_list_len: usize,
 }
 
 impl UiEngine {
@@ -193,6 +198,10 @@ impl UiEngine {
             help_open: false,
             last_draw: Instant::now(),
             idle_hz,
+            last_network_count: 0,
+            last_connected_count: 0,
+            last_buffer_count: 0,
+            last_channel_list_len: 0,
         }
     }
 
@@ -262,15 +271,45 @@ impl UiEngine {
     pub fn draw(&mut self, frame: &mut Frame, vm: &AppViewModel) {
         self.last_draw = Instant::now();
         self.help_open = vm.help_open;
-        self.connected_profiles = vm
-            .networks
-            .iter()
-            .filter(|network| network.connected)
-            .map(|network| network.name.clone())
-            .collect::<Vec<_>>();
-        self.connected_profiles.sort();
-        self.connected_profiles.dedup();
-        self.channel_list_cache = vm.channel_list_cache.clone();
+        
+        // Only rebuild network-related caches when network state changes
+        let connected_count = vm.networks.iter().filter(|n| n.connected).count();
+        let network_count = vm.networks.len();
+        let buffer_count = vm.buffers.len();
+        let channel_list_len = vm.channel_list_cache.values().map(|v| v.len()).sum();
+        
+        if network_count != self.last_network_count || connected_count != self.last_connected_count {
+            self.last_network_count = network_count;
+            self.last_connected_count = connected_count;
+            
+            // Pre-allocate with capacity
+            self.connected_profiles = Vec::with_capacity(connected_count);
+            for network in vm.networks.iter().filter(|n| n.connected) {
+                self.connected_profiles.push(network.name.clone());
+            }
+            self.connected_profiles.sort();
+            self.connected_profiles.dedup();
+            
+            self.server_names = Vec::with_capacity(network_count);
+            for network in &vm.networks {
+                self.server_names.push(network.name.clone());
+            }
+        }
+        
+        // Only clone channel list cache when it changes
+        if channel_list_len != self.last_channel_list_len {
+            self.last_channel_list_len = channel_list_len;
+            self.channel_list_cache = vm.channel_list_cache.clone();
+        }
+        
+        // Only rebuild buffer refs when buffer count changes
+        if buffer_count != self.last_buffer_count {
+            self.last_buffer_count = buffer_count;
+            self.buffer_refs = Vec::with_capacity(buffer_count);
+            for buffer in &vm.buffers {
+                self.buffer_refs.push((buffer.id.network.clone(), buffer.id.name.clone()));
+            }
+        }
 
         let area = frame.area();
         let root = Layout::default()
@@ -296,11 +335,7 @@ impl UiEngine {
             .constraints([Constraint::Length(7), Constraint::Min(4)])
             .split(top[0]);
 
-        self.server_names = vm
-            .networks
-            .iter()
-            .map(|network| network.name.clone())
-            .collect();
+        // Clamp selection indices after potential cache updates
         if self.server_names.is_empty() {
             self.server_selected = 0;
         } else {
@@ -309,11 +344,6 @@ impl UiEngine {
                 .min(self.server_names.len().saturating_sub(1));
         }
 
-        self.buffer_refs = vm
-            .buffers
-            .iter()
-            .map(|buffer| (buffer.id.network.clone(), buffer.id.name.clone()))
-            .collect();
         if self.buffer_refs.is_empty() {
             self.buffer_selected = 0;
         } else {
