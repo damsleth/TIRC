@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn alias_resolution_runs_join() {
         let registry = CommandRegistry::default_registry();
-        let mut state = AppState::new(100);
+        let mut state = AppState::new(100, 1000);
         let output = registry.execute_line(&mut state, CommandSource::Slash, "/j net #rust");
 
         assert_eq!(output.outbound.len(), 1);
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn quit_command_sets_quit_flag() {
         let registry = CommandRegistry::default_registry();
-        let mut state = AppState::new(100);
+        let mut state = AppState::new(100, 1000);
         let output = registry.execute_line(&mut state, CommandSource::Slash, "/quit");
 
         assert!(state.should_quit);
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn theme_command_opens_editor() {
         let registry = CommandRegistry::default_registry();
-        let mut state = AppState::new(100);
+        let mut state = AppState::new(100, 1000);
         let output = registry.execute_line(&mut state, CommandSource::Slash, "/theme");
 
         assert!(output.events.iter().any(|event| {
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn nick_defaults_to_single_profile() {
         let registry = CommandRegistry::default_registry();
-        let mut state = AppState::new(100);
+        let mut state = AppState::new(100, 1000);
         state.networks.insert(
             "default".to_owned(),
             crate::model::NetworkState {
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn disconnect_defaults_to_single_profile() {
         let registry = CommandRegistry::default_registry();
-        let mut state = AppState::new(100);
+        let mut state = AppState::new(100, 1000);
         state.networks.insert(
             "default".to_owned(),
             crate::model::NetworkState {

@@ -36,7 +36,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     } = load_config(&paths, cli.config.as_deref())?;
 
     let mut runtime_config = config;
-    let mut state = tirc_core::AppState::new(runtime_config.ui.max_scrollback_lines);
+    let mut state = tirc_core::AppState::new(
+        runtime_config.ui.max_scrollback_lines,
+        runtime_config.performance.max_channel_list_entries,
+    );
     if warning_plaintext_secret {
         state
             .warnings

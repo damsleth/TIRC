@@ -106,6 +106,8 @@ impl Default for NotificationConfig {
 pub struct PerformanceConfig {
     pub max_idle_redraw_hz: u8,
     pub max_memory_mb: u16,
+    #[serde(default = "default_max_channel_list_entries")]
+    pub max_channel_list_entries: usize,
 }
 
 impl Default for PerformanceConfig {
@@ -113,8 +115,13 @@ impl Default for PerformanceConfig {
         Self {
             max_idle_redraw_hz: 4,
             max_memory_mb: 80,
+            max_channel_list_entries: default_max_channel_list_entries(),
         }
     }
+}
+
+const fn default_max_channel_list_entries() -> usize {
+    10_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

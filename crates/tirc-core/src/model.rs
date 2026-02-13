@@ -128,13 +128,14 @@ pub struct AppState {
     pub help_open: bool,
     pub palette: PaletteState,
     pub max_scrollback_lines: usize,
+    pub max_channel_list_entries: usize,
     pub channel_list_cache: BTreeMap<String, Vec<ChannelListEntry>>,
     #[serde(skip)]
     status_locked_until: Option<DateTime<Utc>>,
 }
 
 impl AppState {
-    pub fn new(max_scrollback_lines: usize) -> Self {
+    pub fn new(max_scrollback_lines: usize, max_channel_list_entries: usize) -> Self {
         Self {
             networks: BTreeMap::new(),
             buffers: BTreeMap::new(),
@@ -146,6 +147,7 @@ impl AppState {
             help_open: false,
             palette: PaletteState::default(),
             max_scrollback_lines,
+            max_channel_list_entries,
             channel_list_cache: BTreeMap::new(),
             status_locked_until: None,
         }
@@ -312,9 +314,10 @@ impl AppState {
                 if let Some(existing) = entries.iter_mut().find(|entry| entry.channel == channel) {
                     existing.users = users;
                     existing.topic = topic;
-                } else {
+                } else if entries.len() < self.max_channel_list_entries {
                     entries.push(ChannelListEntry::new(channel, users, topic));
                 }
+                // Silently drop entries beyond max_channel_list_entries to prevent memory exhaustion
             }
             NetworkEvent::ChannelListEnd { network } => {
                 self.channel_list_cache.entry(network).or_default();
