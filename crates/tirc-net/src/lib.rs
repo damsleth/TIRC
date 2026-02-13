@@ -1030,6 +1030,10 @@ async fn connect_stream(profile: &ServerProfile) -> Result<DynStream, NetError> 
         let tls = connector.connect(profile.host.as_str(), stream).await?;
         Ok(Box::new(tls))
     } else {
+        warn!(
+            "Connecting to {} without TLS - credentials will be sent in plaintext",
+            profile.host
+        );
         Ok(Box::new(stream))
     }
 }

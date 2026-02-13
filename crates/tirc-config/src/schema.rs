@@ -227,7 +227,7 @@ fn sample_profile() -> ServerProfile {
         enabled: true,
         host: "irc.homelien.no".to_owned(),
         port: 6666,
-        tls: false,
+        tls: true,
         nick: "tirc_user".to_owned(),
         user: "tirc".to_owned(),
         realname: "TIRC User".to_owned(),
