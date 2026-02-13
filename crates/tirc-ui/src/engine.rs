@@ -14,7 +14,7 @@ use ratatui::{
 use tirc_config::{Keymap, Theme};
 use tirc_core::{AppViewModel, UiAction, UiEvent};
 
-use crate::{input::InputEditor, palette::PaletteEngine};
+use crate::{input::{InputEditor, InputHistory}, palette::PaletteEngine};
 
 /// Intent emitted by the UI layer into the app reducer.
 #[derive(Debug, Clone)]
@@ -137,9 +137,7 @@ pub struct UiEngine {
     buffer_selected: usize,
     nick_selected: usize,
     composer: Option<ComposerMode>,
-    input_history: Vec<String>,
-    input_history_index: Option<usize>,
-    input_history_draft: String,
+    input_history: InputHistory,
     chat_scroll: u16,
     chat_max_scroll: u16,
     chat_page_step: u16,
@@ -186,9 +184,7 @@ impl UiEngine {
             buffer_selected: 0,
             nick_selected: 0,
             composer: None,
-            input_history: Vec::new(),
-            input_history_index: None,
-            input_history_draft: String::new(),
+            input_history: InputHistory::new(500),
             chat_scroll: 0,
             chat_max_scroll: 0,
             chat_page_step: 8,
@@ -717,8 +713,7 @@ impl UiEngine {
                 let line = self.input.text().to_owned();
                 self.push_history(line.clone());
                 self.input.clear();
-                self.input_history_index = None;
-                self.input_history_draft.clear();
+                self.clear_history_navigation();
                 vec![
                     UiIntent::Event(UiEvent::InputChanged(String::new())),
                     UiIntent::SubmitLine(line),
@@ -1052,8 +1047,7 @@ impl UiEngine {
         };
         let line = format!("/join {profile} {normalized}");
         self.push_history(line.clone());
-        self.input_history_index = None;
-        self.input_history_draft.clear();
+        self.clear_history_navigation();
         self.focus_pane = FocusPane::Input;
         vec![
             UiIntent::Event(UiEvent::InputChanged(String::new())),
@@ -1090,8 +1084,7 @@ impl UiEngine {
                 self.push_history(line.clone());
                 self.composer = None;
                 self.input.clear();
-                self.input_history_index = None;
-                self.input_history_draft.clear();
+                self.clear_history_navigation();
                 vec![
                     UiIntent::Event(UiEvent::InputChanged(String::new())),
                     UiIntent::SubmitLine(line),
@@ -1107,63 +1100,30 @@ impl UiEngine {
     }
 
     fn clear_history_navigation(&mut self) {
-        self.input_history_index = None;
-        self.input_history_draft.clear();
+        self.input_history.reset();
     }
 
     fn push_history(&mut self, line: String) {
-        if line.trim().is_empty() {
-            return;
-        }
         self.input_history.push(line);
-        const MAX_HISTORY: usize = 512;
-        if self.input_history.len() > MAX_HISTORY {
-            let _ = self.input_history.remove(0);
-        }
     }
 
     fn history_prev(&mut self) -> bool {
-        if self.input_history.is_empty() {
-            return false;
+        let current = self.input.text();
+        if let Some(entry) = self.input_history.prev(current) {
+            self.input.set_text(entry.to_owned());
+            true
+        } else {
+            false
         }
-
-        match self.input_history_index {
-            None => {
-                self.input_history_draft = self.input.text().to_owned();
-                self.input_history_index = Some(self.input_history.len().saturating_sub(1));
-            }
-            Some(0) => {}
-            Some(index) => self.input_history_index = Some(index.saturating_sub(1)),
-        }
-
-        if let Some(index) = self.input_history_index
-            && let Some(entry) = self.input_history.get(index)
-        {
-            self.input.set_text(entry.clone());
-            return true;
-        }
-
-        false
     }
 
     fn history_next(&mut self) -> bool {
-        let Some(index) = self.input_history_index else {
-            return false;
-        };
-
-        if index + 1 < self.input_history.len() {
-            self.input_history_index = Some(index + 1);
-            if let Some(entry) = self.input_history.get(index + 1) {
-                self.input.set_text(entry.clone());
-                return true;
-            }
-            return false;
+        if let Some(entry) = self.input_history.next() {
+            self.input.set_text(entry.to_owned());
+            true
+        } else {
+            false
         }
-
-        self.input_history_index = None;
-        self.input.set_text(self.input_history_draft.clone());
-        self.input_history_draft.clear();
-        true
     }
 
     fn scroll_up_lines(&mut self, lines: u16) {

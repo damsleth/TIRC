@@ -105,3 +105,103 @@ impl InputEditor {
         self.text = chars.into_iter().collect();
     }
 }
+
+/// Safe wrapper for input history navigation.
+/// 
+/// Encapsulates history entries, current navigation index, and draft text
+/// to prevent out-of-bounds access and ensure consistent state.
+#[derive(Debug, Clone, Default)]
+pub struct InputHistory {
+    entries: Vec<String>,
+    /// Current position in history. None = at draft (newest).
+    index: Option<usize>,
+    /// Draft text saved when navigating into history.
+    draft: String,
+    /// Maximum number of entries to keep.
+    max_entries: usize,
+}
+
+impl InputHistory {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            index: None,
+            draft: String::new(),
+            max_entries,
+        }
+    }
+
+    /// Push a new entry to history. Resets navigation position.
+    pub fn push(&mut self, entry: String) {
+        if entry.is_empty() {
+            return;
+        }
+        // Deduplicate: don't add if same as last entry
+        if self.entries.last().map(|s| s == &entry).unwrap_or(false) {
+            self.reset();
+            return;
+        }
+        self.entries.push(entry);
+        // Enforce max entries
+        while self.entries.len() > self.max_entries {
+            self.entries.remove(0);
+        }
+        self.reset();
+    }
+
+    /// Reset navigation position to newest (draft).
+    pub fn reset(&mut self) {
+        self.index = None;
+        self.draft.clear();
+    }
+
+    /// Navigate to previous (older) entry. Returns the text to display, if any.
+    pub fn prev(&mut self, current_text: &str) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        match self.index {
+            None => {
+                // Save current text as draft and go to newest history entry
+                self.draft = current_text.to_owned();
+                self.index = Some(self.entries.len() - 1);
+            }
+            Some(0) => {
+                // Already at oldest, don't move
+                return self.entries.first().map(String::as_str);
+            }
+            Some(idx) => {
+                self.index = Some(idx - 1);
+            }
+        }
+
+        self.index.and_then(|idx| self.entries.get(idx)).map(String::as_str)
+    }
+
+    /// Navigate to next (newer) entry. Returns the text to display, if any.
+    pub fn next(&mut self) -> Option<&str> {
+        let Some(idx) = self.index else {
+            return None;
+        };
+
+        if idx + 1 < self.entries.len() {
+            self.index = Some(idx + 1);
+            return self.entries.get(idx + 1).map(String::as_str);
+        }
+
+        // Return to draft
+        self.index = None;
+        Some(&self.draft)
+    }
+
+    /// Get current draft text (for restoration).
+    pub fn draft(&self) -> &str {
+        &self.draft
+    }
+
+    /// Check if currently navigating history.
+    pub fn is_navigating(&self) -> bool {
+        self.index.is_some()
+    }
+}
