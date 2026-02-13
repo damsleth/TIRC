@@ -17,7 +17,7 @@ use tirc_config::{
 };
 use tirc_core::{
     AppEvent, CommandEvent, CommandRegistry, CommandSource, LogRecord, LogWriter, NetworkEvent,
-    TimerEvent, UiEvent, build_session_snapshot, load_session, save_session,
+    TimerEvent, UiAction, UiEvent, build_session_snapshot, load_session, save_session,
 };
 use tirc_net::{NetCommand, NetError, NetManager};
 use tirc_platform::PlatformNotifier;
@@ -364,17 +364,17 @@ async fn handle_ui_intents(
                     .await;
                 }
             }
-            UiIntent::Event(UiEvent::Action(action)) if action == "config.reload" => {
+            UiIntent::Event(UiEvent::Action(UiAction::ConfigReload)) => {
                 side_effects.reload_config = true;
             }
-            UiIntent::Event(UiEvent::Action(action)) if action == "buffer.close.confirm" => {
+            UiIntent::Event(UiEvent::Action(UiAction::BufferCloseConfirm)) => {
                 ui.open_close_confirmation();
                 state.set_status_for(
                     "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
                     Duration::from_millis(2_000),
                 );
             }
-            UiIntent::Event(UiEvent::Action(action)) if action == "buffer.close.current" => {
+            UiIntent::Event(UiEvent::Action(UiAction::BufferCloseCurrent)) => {
                 close_focused_buffer(state, net_manager).await;
             }
             UiIntent::Event(event) => state.apply(AppEvent::Ui(event)),

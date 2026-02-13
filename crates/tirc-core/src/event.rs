@@ -12,6 +12,64 @@ pub enum AppEvent {
     Timer(TimerEvent),
 }
 
+/// UI action identifiers - compile-time safe replacement for magic strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UiAction {
+    AppQuit,
+    PaletteToggle,
+    PaletteClose,
+    PaletteExecute,
+    HelpToggle,
+    HelpClose,
+    BufferNext,
+    BufferPrev,
+    BufferCloseConfirm,
+    BufferCloseCurrent,
+    ThemeEditorToggle,
+    KeymapEditorToggle,
+    ConfigReload,
+    InputHome,
+    InputEnd,
+    InputKillToEnd,
+    InputKillToStart,
+    InputKillWord,
+    ScrollUpPage,
+    ScrollDownPage,
+    ScrollUpLine,
+    ScrollDownLine,
+}
+
+impl UiAction {
+    /// Parse action from keymap string representation.
+    pub fn from_keymap_str(s: &str) -> Option<Self> {
+        match s {
+            "app.quit" => Some(Self::AppQuit),
+            "palette.toggle" => Some(Self::PaletteToggle),
+            "palette.close" => Some(Self::PaletteClose),
+            "palette.execute" => Some(Self::PaletteExecute),
+            "help.toggle" => Some(Self::HelpToggle),
+            "help.close" => Some(Self::HelpClose),
+            "buffer.next" => Some(Self::BufferNext),
+            "buffer.prev" => Some(Self::BufferPrev),
+            "buffer.close.confirm" => Some(Self::BufferCloseConfirm),
+            "buffer.close.current" => Some(Self::BufferCloseCurrent),
+            "theme.editor.toggle" => Some(Self::ThemeEditorToggle),
+            "keymap.editor.toggle" => Some(Self::KeymapEditorToggle),
+            "config.reload" => Some(Self::ConfigReload),
+            "input.home" => Some(Self::InputHome),
+            "input.end" => Some(Self::InputEnd),
+            "input.kill_to_end" => Some(Self::InputKillToEnd),
+            "input.kill_to_start" => Some(Self::InputKillToStart),
+            "input.kill_word" => Some(Self::InputKillWord),
+            "scroll.up_page" => Some(Self::ScrollUpPage),
+            "scroll.down_page" => Some(Self::ScrollDownPage),
+            "scroll.up_line" => Some(Self::ScrollUpLine),
+            "scroll.down_line" => Some(Self::ScrollDownLine),
+            _ => None,
+        }
+    }
+}
+
 /// Normalized network-level events produced by connection tasks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkEvent {
@@ -71,7 +129,7 @@ pub enum NetworkEvent {
 pub enum UiEvent {
     InputChanged(String),
     InputSubmitted,
-    Action(String),
+    Action(UiAction),
     PaletteQuery(String),
     PaletteExecute(String),
     Resize { width: u16, height: u16 },

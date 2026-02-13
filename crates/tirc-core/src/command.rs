@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    event::{AppEvent, CommandEvent, CommandSource, UiEvent},
+    event::{AppEvent, CommandEvent, CommandSource, UiAction, UiEvent},
     model::AppState,
 };
 
@@ -188,7 +188,7 @@ impl CommandRegistry {
         match command.as_str() {
             "help" => {
                 out.events
-                    .push(AppEvent::Ui(UiEvent::Action("help.toggle".to_owned())));
+                    .push(AppEvent::Ui(UiEvent::Action(UiAction::HelpToggle)));
                 out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                     command,
                     detail: "Help toggled".to_owned(),
@@ -375,7 +375,7 @@ impl CommandRegistry {
             }
             "theme" => {
                 out.events.push(AppEvent::Ui(UiEvent::Action(
-                    "theme.editor.toggle".to_owned(),
+                    UiAction::ThemeEditorToggle,
                 )));
                 out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                     command,
@@ -384,7 +384,7 @@ impl CommandRegistry {
             }
             "keymap" => {
                 out.events.push(AppEvent::Ui(UiEvent::Action(
-                    "keymap.editor.toggle".to_owned(),
+                    UiAction::KeymapEditorToggle,
                 )));
                 out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                     command,
@@ -619,7 +619,7 @@ mod tests {
         assert!(output.events.iter().any(|event| {
             matches!(
                 event,
-                AppEvent::Ui(UiEvent::Action(action)) if action == "theme.editor.toggle"
+                AppEvent::Ui(UiEvent::Action(UiAction::ThemeEditorToggle))
             )
         }));
     }

@@ -4,7 +4,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::event::{AppEvent, NetworkEvent, UiEvent};
+use crate::event::{AppEvent, NetworkEvent, UiAction, UiEvent};
 
 /// Unique buffer identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -364,16 +364,30 @@ impl AppState {
         match event {
             UiEvent::InputChanged(input) => self.input = input,
             UiEvent::InputSubmitted => {}
-            UiEvent::Action(action) => match action.as_str() {
-                "app.quit" => self.should_quit = true,
-                "palette.toggle" => self.palette.open = !self.palette.open,
-                "help.toggle" => self.help_open = !self.help_open,
-                "help.close" => self.help_open = false,
-                "buffer.next" => self.cycle_focus(1),
-                "buffer.prev" => self.cycle_focus(-1),
-                "palette.close" => self.palette.open = false,
-                "palette.execute" => {}
-                _ => self.set_status(format!("Unknown action: {action}")),
+            UiEvent::Action(action) => match action {
+                UiAction::AppQuit => self.should_quit = true,
+                UiAction::PaletteToggle => self.palette.open = !self.palette.open,
+                UiAction::HelpToggle => self.help_open = !self.help_open,
+                UiAction::HelpClose => self.help_open = false,
+                UiAction::BufferNext => self.cycle_focus(1),
+                UiAction::BufferPrev => self.cycle_focus(-1),
+                UiAction::PaletteClose => self.palette.open = false,
+                UiAction::PaletteExecute => {}
+                // These actions are handled by UI layer, not state
+                UiAction::BufferCloseConfirm
+                | UiAction::BufferCloseCurrent
+                | UiAction::ThemeEditorToggle
+                | UiAction::KeymapEditorToggle
+                | UiAction::ConfigReload
+                | UiAction::InputHome
+                | UiAction::InputEnd
+                | UiAction::InputKillToEnd
+                | UiAction::InputKillToStart
+                | UiAction::InputKillWord
+                | UiAction::ScrollUpPage
+                | UiAction::ScrollDownPage
+                | UiAction::ScrollUpLine
+                | UiAction::ScrollDownLine => {}
             },
             UiEvent::PaletteQuery(query) => self.palette.query = query,
             UiEvent::PaletteExecute(_) => {}

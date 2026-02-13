@@ -12,7 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use tirc_config::{Keymap, Theme};
-use tirc_core::{AppViewModel, UiEvent};
+use tirc_core::{AppViewModel, UiAction, UiEvent};
 
 use crate::{input::InputEditor, palette::PaletteEngine};
 
@@ -117,7 +117,7 @@ enum FocusPane {
 /// Stateful ratatui engine for rendering and keyboard handling.
 pub struct UiEngine {
     theme: Theme,
-    keymap_actions: HashMap<String, String>,
+    keymap_actions: HashMap<String, UiAction>,
     input: InputEditor,
     pub palette_open: bool,
     palette: PaletteEngine,
@@ -627,16 +627,16 @@ impl UiEngine {
         if self.help_open {
             match key.code {
                 KeyCode::Esc => {
-                    return vec![UiIntent::Event(UiEvent::Action("help.close".to_owned()))];
+                    return vec![UiIntent::Event(UiEvent::Action(UiAction::HelpClose))];
                 }
                 KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
-                    return vec![UiIntent::Event(UiEvent::Action("help.close".to_owned()))];
+                    return vec![UiIntent::Event(UiEvent::Action(UiAction::HelpClose))];
                 }
                 _ => {
                     if let Some(action) = self.lookup_action(key)
-                        && action == "help.toggle"
+                        && action == UiAction::HelpToggle
                     {
-                        return self.handle_action(&action);
+                        return self.handle_action(action);
                     }
                     return Vec::new();
                 }
@@ -648,7 +648,7 @@ impl UiEngine {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.close_confirm_open = false;
                     return vec![UiIntent::Event(UiEvent::Action(
-                        "buffer.close.current".to_owned(),
+                        UiAction::BufferCloseCurrent,
                     ))];
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -697,7 +697,7 @@ impl UiEngine {
         }
 
         if let Some(action) = self.lookup_action(key) {
-            return self.handle_action(&action);
+            return self.handle_action(action);
         }
 
         match key.code {
@@ -794,9 +794,7 @@ impl UiEngine {
                 self.palette_open = false;
                 self.palette.clear_query();
                 self.reset_palette_mode();
-                vec![UiIntent::Event(UiEvent::Action(
-                    "palette.toggle".to_owned(),
-                ))]
+                vec![UiIntent::Event(UiEvent::Action(UiAction::PaletteToggle))]
             }
             KeyCode::Up => {
                 self.palette.move_selection_up();
@@ -881,9 +879,9 @@ impl UiEngine {
         }
     }
 
-    fn handle_action(&mut self, action: &str) -> Vec<UiIntent> {
+    fn handle_action(&mut self, action: UiAction) -> Vec<UiIntent> {
         match action {
-            "palette.toggle" => {
+            UiAction::PaletteToggle => {
                 self.palette_open = !self.palette_open;
                 if self.palette_open {
                     self.reset_palette_mode();
@@ -892,71 +890,72 @@ impl UiEngine {
                 }
                 self.theme_editor.open = false;
                 self.keymap_editor.open = false;
-                vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
+                vec![UiIntent::Event(UiEvent::Action(action))]
             }
-            "help.toggle" => vec![UiIntent::Event(UiEvent::Action(action.to_owned()))],
-            "theme.editor.toggle" => {
+            UiAction::HelpToggle => vec![UiIntent::Event(UiEvent::Action(action))],
+            UiAction::ThemeEditorToggle => {
                 self.theme_editor.open = !self.theme_editor.open;
                 self.keymap_editor.open = false;
                 self.palette_open = false;
-                vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
+                vec![UiIntent::Event(UiEvent::Action(action))]
             }
-            "keymap.editor.toggle" => {
+            UiAction::KeymapEditorToggle => {
                 self.keymap_editor.open = !self.keymap_editor.open;
                 self.theme_editor.open = false;
                 self.palette_open = false;
-                vec![UiIntent::Event(UiEvent::Action(action.to_owned()))]
+                vec![UiIntent::Event(UiEvent::Action(action))]
             }
-            "buffer.close.confirm" => {
+            UiAction::BufferCloseConfirm => {
                 self.close_confirm_open = true;
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
-            "input.home" => {
+            UiAction::InputHome => {
                 self.input.move_home();
                 Vec::new()
             }
-            "input.end" => {
+            UiAction::InputEnd => {
                 self.input.move_end();
                 Vec::new()
             }
-            "input.kill_to_end" => {
+            UiAction::InputKillToEnd => {
                 self.clear_history_navigation();
                 self.input.kill_to_end();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            "input.kill_to_start" => {
+            UiAction::InputKillToStart => {
                 self.clear_history_navigation();
                 self.input.kill_to_start();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            "input.kill_word" => {
+            UiAction::InputKillWord => {
                 self.clear_history_navigation();
                 self.input.kill_word();
                 vec![UiIntent::Event(UiEvent::InputChanged(
                     self.input.text().to_owned(),
                 ))]
             }
-            "scroll.up_page" => {
+            UiAction::ScrollUpPage => {
                 self.scroll_up_lines(self.chat_page_step);
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
-            "scroll.down_page" => {
+            UiAction::ScrollDownPage => {
                 self.scroll_down_lines(self.chat_page_step);
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
-            "scroll.up_line" => {
+            UiAction::ScrollUpLine => {
                 self.scroll_up_lines(1);
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
-            "scroll.down_line" => {
+            UiAction::ScrollDownLine => {
                 self.scroll_down_lines(1);
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
-            _ => vec![UiIntent::Event(UiEvent::Action(action.to_owned()))],
+            // Forward other actions to the app layer
+            _ => vec![UiIntent::Event(UiEvent::Action(action))],
         }
     }
 
@@ -1279,9 +1278,9 @@ impl UiEngine {
         vec![UiIntent::SubmitLine(format!("/query {profile} {target}"))]
     }
 
-    fn lookup_action(&self, key: KeyEvent) -> Option<String> {
+    fn lookup_action(&self, key: KeyEvent) -> Option<UiAction> {
         let canonical = canonical_key(key);
-        self.keymap_actions.get(&canonical).cloned()
+        self.keymap_actions.get(&canonical).copied()
     }
 
     fn render_help_overlay(&self, frame: &mut Frame, area: Rect) {
@@ -1439,7 +1438,7 @@ impl UiEngine {
     }
 }
 
-fn flatten_keymap(keymap: &Keymap) -> HashMap<String, String> {
+fn flatten_keymap(keymap: &Keymap) -> HashMap<String, UiAction> {
     let mut map = HashMap::new();
     for binding in keymap
         .global
@@ -1447,7 +1446,9 @@ fn flatten_keymap(keymap: &Keymap) -> HashMap<String, String> {
         .chain(keymap.input.iter())
         .chain(keymap.buffer.iter())
     {
-        map.insert(binding.key.to_ascii_lowercase(), binding.action.clone());
+        if let Some(action) = UiAction::from_keymap_str(&binding.action) {
+            map.insert(binding.key.to_ascii_lowercase(), action);
+        }
     }
     map
 }
