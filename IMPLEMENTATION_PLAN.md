@@ -110,42 +110,28 @@ This plan addresses architectural, security, and correctness issues identified i
 - [ ] **6.2 Integration Tests**
   - Add tests for QUIT/KICK handling
   - Add tests for history navigation
-  - Construct `LogRecord` directly
-  - Use `Cow<str>` where appropriate
-  - Files: `app.rs`
-
-## Phase 5: Security & Configuration
-
-- [ ] **5.1 TLS Configuration Options**
-  - Add `TlsConfig` with verify options
-  - Update `connect_stream()` to apply settings
-  - Files: `schema.rs`, `tirc-net/src/lib.rs`
-
-- [ ] **5.2 STATUSMSG Handling**
-  - Parse prefixes from PRIVMSG target
-  - Strip prefix for buffer name
-  - Files: `tirc-net/src/lib.rs`
-
-## Phase 6: Testing
-
-- [ ] **6.1 Unit Tests for Command Registry**
-  - Test all command variants
-  - Test error cases and aliases
-  - Files: `command.rs`
-
-- [ ] **6.2 Unit Tests for UiEngine**
-  - Test key handling
-  - Test palette modes
-  - Test scroll bounds
-  - Files: `engine.rs`
-
-- [ ] **6.3 Integration Tests for Network**
-  - Mock IRC server
-  - Test connection lifecycle
-  - Files: `tirc-net/tests/`
 
 ---
 
 ## Progress Tracking
 
-Started: 2026-02-13
+**Started:** 2026-02-13
+
+### Completed (11 items)
+- Phase 1: Critical Safety Fixes (4/4)
+- Phase 2: IRC Protocol Completeness (4/4)
+- Phase 3: Architecture Refactoring (2/4)
+- Phase 5: Security Hardening (1/2)
+
+### Commits
+- `4a191f1` fix: bound channel_list_cache to prevent memory exhaustion
+- `17bc3f2` fix: limit nick collision retries to prevent infinite loop
+- `0793015` refactor: replace magic action strings with UiAction enum
+- `7a7d34b` feat(log): implement secret redaction for sensitive data
+- `fe9530f` feat(net): implement CTCP support
+- `e665dad` feat(net): implement proper QUIT handling
+- `d1d9c4c` feat(net): implement proper KICK handling
+- `8a7380d` feat(net): implement MODE tracking
+- `15f9217` refactor(core): remove unused tirc-config dependency
+- `1e021f1` refactor(ui): create InputHistory wrapper for safe history navigation
+- `b2bc838` feat(security): enforce TLS by default with plaintext warning
