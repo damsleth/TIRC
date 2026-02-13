@@ -587,6 +587,22 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 })
                 .await;
         }
+        Command::QUIT(reason) => {
+            if let Some(nick) = source_nick {
+                // Find all channels this user was in
+                // Note: We don't track other users' channel membership, so we send to all joined channels
+                // The UI can filter based on nick list tracking
+                let channels: Vec<String> = joined_channels.iter().cloned().collect();
+                let _ = events_tx
+                    .send(NetworkEvent::UserQuit {
+                        network: profile.name.clone(),
+                        nick,
+                        reason,
+                        channels,
+                    })
+                    .await;
+            }
+        }
         Command::CAP(_, subcommand, _, params) => {
             handle_cap_message(subcommand, params, profile, runtime, writer, events_tx).await?;
         }

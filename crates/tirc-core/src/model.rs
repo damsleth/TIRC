@@ -291,6 +291,46 @@ impl AppState {
                     },
                 );
             }
+            NetworkEvent::UserQuit {
+                network,
+                nick,
+                reason,
+                channels,
+            } => {
+                let quit_msg = if let Some(r) = reason {
+                    format!("{nick} has quit ({r})")
+                } else {
+                    format!("{nick} has quit")
+                };
+                
+                // Remove the user from all channel nick lists and post quit message to affected channels
+                for channel in &channels {
+                    let id = BufferId {
+                        network: network.clone(),
+                        name: channel.clone(),
+                    };
+                    if let Some(buffer) = self.buffers.get_mut(&id) {
+                        // Remove user from nicklist (accounting for mode prefixes like @, +)
+                        buffer.nicklist.retain(|n| {
+                            let plain_nick = n.trim_start_matches(&['@', '+', '%', '&', '~'][..]);
+                            plain_nick != nick
+                        });
+                        
+                        // Post quit message to this channel
+                        buffer.messages.push_back(Message {
+                            ts: Utc::now(),
+                            sender: None,
+                            body: quit_msg.clone(),
+                            mention: false,
+                            tags: BTreeMap::new(),
+                        });
+                        // Enforce scrollback limit
+                        while buffer.messages.len() > self.max_scrollback_lines {
+                            buffer.messages.pop_front();
+                        }
+                    }
+                }
+            }
             NetworkEvent::NickList {
                 network,
                 channel,

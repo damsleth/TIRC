@@ -90,6 +90,13 @@ pub enum NetworkEvent {
         channel: String,
         reason: Option<String>,
     },
+    /// A user quit the network
+    UserQuit {
+        network: String,
+        nick: String,
+        reason: Option<String>,
+        channels: Vec<String>,
+    },
     NickList {
         network: String,
         channel: String,
