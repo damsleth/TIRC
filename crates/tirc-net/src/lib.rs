@@ -620,6 +620,41 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 })
                 .await;
         }
+        Command::ChannelMODE(channel, modes) => {
+            // Convert Mode objects to strings
+            let mode_str: String = modes
+                .iter()
+                .map(|m| format!("{}", m))
+                .collect::<Vec<_>>()
+                .join("");
+            // Extract args from mode objects (nicks for +o, +v etc)
+            let args: Vec<String> = modes.iter().filter_map(|m| m.arg().map(ToOwned::to_owned)).collect();
+            let _ = events_tx
+                .send(NetworkEvent::ModeChange {
+                    network: profile.name.clone(),
+                    target: channel,
+                    modes: mode_str,
+                    args,
+                    set_by: source_nick.clone(),
+                })
+                .await;
+        }
+        Command::UserMODE(user, modes) => {
+            let mode_str: String = modes
+                .iter()
+                .map(|m| format!("{}", m))
+                .collect::<Vec<_>>()
+                .join("");
+            let _ = events_tx
+                .send(NetworkEvent::ModeChange {
+                    network: profile.name.clone(),
+                    target: user,
+                    modes: mode_str,
+                    args: vec![],
+                    set_by: source_nick.clone(),
+                })
+                .await;
+        }
         Command::CAP(_, subcommand, _, params) => {
             handle_cap_message(subcommand, params, profile, runtime, writer, events_tx).await?;
         }

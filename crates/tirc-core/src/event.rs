@@ -107,6 +107,14 @@ pub enum NetworkEvent {
         /// True if we were the one kicked
         was_self: bool,
     },
+    /// Channel or user mode changed
+    ModeChange {
+        network: String,
+        target: String,
+        modes: String,
+        args: Vec<String>,
+        set_by: Option<String>,
+    },
     NickList {
         network: String,
         channel: String,

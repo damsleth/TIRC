@@ -391,6 +391,109 @@ impl AppState {
                     self.set_status(format!("Kicked from {channel}"));
                 }
             }
+            NetworkEvent::ModeChange {
+                network,
+                target,
+                modes,
+                args,
+                set_by,
+            } => {
+                // Check if this is a channel mode change (affects nick prefixes)
+                if target.starts_with('#') || target.starts_with('&') {
+                    let id = BufferId {
+                        network: network.clone(),
+                        name: target.clone(),
+                    };
+                    
+                    if let Some(buffer) = self.buffers.get_mut(&id) {
+                        // Parse mode changes and update nick prefixes
+                        // Format: +ooo nick1 nick2 nick3 or +o-v nick1 nick2
+                        let mut adding = true;
+                        let mut arg_idx = 0;
+                        
+                        for ch in modes.chars() {
+                            match ch {
+                                '+' => adding = true,
+                                '-' => adding = false,
+                                'o' | 'v' | 'h' | 'a' | 'q' => {
+                                    // These modes take nick arguments
+                                    if let Some(nick) = args.get(arg_idx) {
+                                        let prefix = match ch {
+                                            'q' => '~', // owner
+                                            'a' => '&', // admin
+                                            'o' => '@', // op
+                                            'h' => '%', // halfop
+                                            'v' => '+', // voice
+                                            _ => continue,
+                                        };
+                                        
+                                        // Find and update the nick in nicklist
+                                        for entry in &mut buffer.nicklist {
+                                            let plain = entry.trim_start_matches(&['~', '&', '@', '%', '+'][..]);
+                                            if plain == nick {
+                                                if adding {
+                                                    // Add prefix if not already present
+                                                    if !entry.starts_with(prefix) {
+                                                        *entry = format!("{prefix}{plain}");
+                                                    }
+                                                } else {
+                                                    // Remove prefix
+                                                    *entry = plain.to_owned();
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        arg_idx += 1;
+                                    }
+                                }
+                                'b' | 'e' | 'I' | 'k' => {
+                                    // These modes also consume an argument
+                                    arg_idx += 1;
+                                }
+                                'l' => {
+                                    // +l takes argument, -l doesn't
+                                    if adding {
+                                        arg_idx += 1;
+                                    }
+                                }
+                                _ => {} // Other modes don't consume args
+                            }
+                        }
+                        
+                        // Display mode change in channel
+                        let mode_msg = if let Some(setter) = set_by {
+                            format!("{setter} sets mode: {modes} {}", args.join(" "))
+                        } else {
+                            format!("Mode: {modes} {}", args.join(" "))
+                        };
+                        
+                        buffer.messages.push_back(Message {
+                            ts: Utc::now(),
+                            sender: None,
+                            body: mode_msg,
+                            mention: false,
+                            tags: BTreeMap::new(),
+                        });
+                        
+                        while buffer.messages.len() > self.max_scrollback_lines {
+                            buffer.messages.pop_front();
+                        }
+                    }
+                } else {
+                    // User mode change (affects us)
+                    self.push_message(
+                        &network,
+                        "status",
+                        Message {
+                            ts: Utc::now(),
+                            sender: None,
+                            body: format!("Mode {modes} set for {target}"),
+                            mention: false,
+                            tags: BTreeMap::new(),
+                        },
+                    );
+                }
+            }
             NetworkEvent::ChannelListStart { network } => {
                 self.channel_list_cache.insert(network, Vec::new());
             }
