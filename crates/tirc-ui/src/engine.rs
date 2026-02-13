@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -154,6 +154,15 @@ pub struct UiEngine {
     // Sidebar visibility
     show_left_sidebar: bool,
     show_right_sidebar: bool,
+    // Nicklist scroll and filter
+    nicklist_scroll: usize,
+    nicklist_filter: String,
+    nicklist_filtering: bool,
+    // Layout regions for mouse hit testing
+    region_servers: Option<Rect>,
+    region_buffers: Option<Rect>,
+    region_chat: Option<Rect>,
+    region_nicklist: Option<Rect>,
 }
 
 impl UiEngine {
@@ -207,6 +216,13 @@ impl UiEngine {
             last_channel_list_len: 0,
             show_left_sidebar: true,
             show_right_sidebar: true,
+            nicklist_scroll: 0,
+            nicklist_filter: String::new(),
+            nicklist_filtering: false,
+            region_servers: None,
+            region_buffers: None,
+            region_chat: None,
+            region_nicklist: None,
         }
     }
 
@@ -354,6 +370,17 @@ impl UiEngine {
                 .constraints([Constraint::Length(7), Constraint::Min(4)])
                 .split(area)
         });
+
+        // Store layout regions for mouse hit testing
+        self.region_chat = Some(chat_area);
+        self.region_nicklist = right_area;
+        if let Some(ref left) = left {
+            self.region_servers = Some(left[0]);
+            self.region_buffers = Some(left[1]);
+        } else {
+            self.region_servers = None;
+            self.region_buffers = None;
+        }
 
         // Clamp selection indices after potential cache updates
         if self.server_names.is_empty() {
@@ -516,6 +543,10 @@ impl UiEngine {
         if self.last_active_buffer != active_buffer_key {
             self.last_active_buffer = active_buffer_key;
             self.chat_follow_tail = true;
+            // Clear nicklist filter when switching buffers
+            self.nicklist_filter.clear();
+            self.nicklist_filtering = false;
+            self.nick_selected = 0;
         }
 
         let viewport_lines = chat_area.height.saturating_sub(2).max(1);
@@ -547,34 +578,55 @@ impl UiEngine {
             chat_area,
         );
 
-        let nick_items = vm
+        // Build filtered nicklist
+        let raw_nicks: Vec<String> = vm
             .active_buffer
             .as_ref()
-            .map(|buffer| {
-                self.nick_refs = buffer.nicklist.clone();
-                buffer
-                    .nicklist
-                    .iter()
-                    .map(|nick| ListItem::new(nick.clone()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                self.nick_refs.clear();
-                Vec::new()
-            });
+            .map(|buffer| buffer.nicklist.clone())
+            .unwrap_or_default();
+        
+        // Apply filter if active
+        let filtered_nicks: Vec<String> = if self.nicklist_filtering && !self.nicklist_filter.is_empty() {
+            let filter_lower = self.nicklist_filter.to_lowercase();
+            raw_nicks.iter()
+                .filter(|nick| nick.to_lowercase().contains(&filter_lower))
+                .cloned()
+                .collect()
+        } else {
+            raw_nicks.clone()
+        };
+        
+        self.nick_refs = filtered_nicks.clone();
+        
+        let nick_items: Vec<ListItem> = filtered_nicks
+            .iter()
+            .map(|nick| ListItem::new(nick.clone()))
+            .collect();
+        
         if self.nick_refs.is_empty() {
             self.nick_selected = 0;
+            self.nicklist_scroll = 0;
         } else {
             self.nick_selected = self
                 .nick_selected
                 .min(self.nick_refs.len().saturating_sub(1));
         }
 
-        let nick_count = self.nick_refs.len();
+        let nick_count = raw_nicks.len();
+        let filtered_count = filtered_nicks.len();
         let mut nick_state = ListState::default();
         if !nick_items.is_empty() {
             nick_state.select(Some(self.nick_selected));
         }
+
+        // Build nicklist title with filter indicator
+        let nicklist_title = if self.nicklist_filtering {
+            format!("Nicklist [{}] /{}", filtered_count, self.nicklist_filter)
+        } else if filtered_count != nick_count {
+            format!("Nicklist [{}/{}]", filtered_count, nick_count)
+        } else {
+            format!("Nicklist [{}]", nick_count)
+        };
 
         // Render right sidebar (nicklist) if visible
         if let Some(right) = right_area {
@@ -586,7 +638,7 @@ impl UiEngine {
                     ))
                     .block(
                         Block::default()
-                            .title(format!("Nicklist [{nick_count}]"))
+                            .title(nicklist_title)
                             .borders(Borders::ALL)
                             .border_style(border_style(
                                 &self.theme,
@@ -658,19 +710,118 @@ impl UiEngine {
     pub fn handle_terminal_event(&mut self, event: Event) -> Vec<UiIntent> {
         match event {
             Event::Key(key) => self.handle_key(key),
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::ScrollUp => {
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize(width, height) => {
+                vec![UiIntent::Event(UiEvent::Resize { width, height })]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Vec<UiIntent> {
+        let pos = (mouse.column, mouse.row);
+        
+        // Helper to check if position is within a rect
+        let in_rect = |rect: Option<Rect>| -> bool {
+            rect.map(|r| {
+                pos.0 >= r.x && pos.0 < r.x + r.width && pos.1 >= r.y && pos.1 < r.y + r.height
+            }).unwrap_or(false)
+        };
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if in_rect(self.region_nicklist) {
+                    // Scroll nicklist up
+                    if self.nick_selected > 0 {
+                        self.nick_selected = self.nick_selected.saturating_sub(3);
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_chat) {
+                    self.scroll_up_lines(3);
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_servers) {
+                    if self.server_selected > 0 {
+                        self.server_selected = self.server_selected.saturating_sub(1);
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_buffers) {
+                    if self.buffer_selected > 0 {
+                        self.buffer_selected = self.buffer_selected.saturating_sub(1);
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else {
                     self.scroll_up_lines(3);
                     vec![UiIntent::Event(UiEvent::Tick)]
                 }
-                MouseEventKind::ScrollDown => {
+            }
+            MouseEventKind::ScrollDown => {
+                if in_rect(self.region_nicklist) {
+                    // Scroll nicklist down
+                    if !self.nick_refs.is_empty() {
+                        self.nick_selected = (self.nick_selected + 3).min(self.nick_refs.len().saturating_sub(1));
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_chat) {
+                    self.scroll_down_lines(3);
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_servers) {
+                    if !self.server_names.is_empty() {
+                        self.server_selected = (self.server_selected + 1).min(self.server_names.len().saturating_sub(1));
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_buffers) {
+                    if !self.buffer_refs.is_empty() {
+                        self.buffer_selected = (self.buffer_selected + 1).min(self.buffer_refs.len().saturating_sub(1));
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else {
                     self.scroll_down_lines(3);
                     vec![UiIntent::Event(UiEvent::Tick)]
                 }
-                _ => Vec::new(),
-            },
-            Event::Resize(width, height) => {
-                vec![UiIntent::Event(UiEvent::Resize { width, height })]
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if in_rect(self.region_servers) {
+                    // Click on server list - select and focus
+                    if let Some(rect) = self.region_servers {
+                        let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize; // -1 for border
+                        if rel_y < self.server_names.len() {
+                            self.server_selected = rel_y;
+                            self.focus_pane = FocusPane::Servers;
+                        }
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_buffers) {
+                    // Click on buffer list - select and switch
+                    if let Some(rect) = self.region_buffers {
+                        let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize;
+                        if rel_y < self.buffer_refs.len() {
+                            self.buffer_selected = rel_y;
+                            self.focus_pane = FocusPane::Buffers;
+                            if let Some((network, name)) = self.buffer_refs.get(rel_y).cloned() {
+                                return vec![
+                                    UiIntent::Event(UiEvent::Tick),
+                                    UiIntent::SubmitLine(format!("/buffer {}/{}", network, name)),
+                                ];
+                            }
+                        }
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_nicklist) {
+                    // Click on nicklist - select nick
+                    if let Some(rect) = self.region_nicklist {
+                        let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize;
+                        if rel_y < self.nick_refs.len() {
+                            self.nick_selected = rel_y;
+                            self.focus_pane = FocusPane::Nicklist;
+                        }
+                    }
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else if in_rect(self.region_chat) {
+                    self.focus_pane = FocusPane::Chat;
+                    vec![UiIntent::Event(UiEvent::Tick)]
+                } else {
+                    Vec::new()
+                }
             }
             _ => Vec::new(),
         }
@@ -728,6 +879,31 @@ impl UiEngine {
             return self.handle_selection_editor_key(EditorKind::Keymap, key);
         }
 
+        // Handle nicklist filter mode
+        if self.nicklist_filtering {
+            match key.code {
+                KeyCode::Esc => {
+                    self.nicklist_filtering = false;
+                    self.nicklist_filter.clear();
+                    return vec![UiIntent::Event(UiEvent::Tick)];
+                }
+                KeyCode::Enter => {
+                    // Keep filter active but exit filter mode
+                    self.nicklist_filtering = false;
+                    return vec![UiIntent::Event(UiEvent::Tick)];
+                }
+                KeyCode::Backspace => {
+                    self.nicklist_filter.pop();
+                    return vec![UiIntent::Event(UiEvent::Tick)];
+                }
+                KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE => {
+                    self.nicklist_filter.push(c);
+                    return vec![UiIntent::Event(UiEvent::Tick)];
+                }
+                _ => return Vec::new(),
+            }
+        }
+
         match key.code {
             KeyCode::Tab => {
                 self.cycle_focus_pane(1);
@@ -749,6 +925,15 @@ impl UiEngine {
                     && !self.nick_refs.is_empty() =>
             {
                 return self.open_pm_from_nicklist();
+            }
+            // "/" starts nicklist filter mode when nicklist is focused
+            KeyCode::Char('/')
+                if self.focus_pane == FocusPane::Nicklist
+                    && !self.nicklist_filtering =>
+            {
+                self.nicklist_filtering = true;
+                self.nicklist_filter.clear();
+                return vec![UiIntent::Event(UiEvent::Tick)];
             }
             _ => {}
         }
@@ -1335,6 +1520,10 @@ impl UiEngine {
             Line::from("Alt-Left / Alt-Right: Cycle buffers"),
             Line::from("Ctrl-A / Ctrl-E: Start/end of input"),
             Line::from("Ctrl-K / Ctrl-U / Ctrl-W: Kill operations"),
+            Line::from(""),
+            Line::from("Mouse: Click to select, scroll in any pane"),
+            Line::from("Nicklist: / to filter, Enter to confirm, Esc to clear"),
+            Line::from(""),
             Line::from("/join /part /query /msg /connect /disconnect /theme /keymap /quit"),
         ];
 
