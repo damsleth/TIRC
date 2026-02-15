@@ -195,18 +195,18 @@ impl CommandRegistry {
                 }));
             }
             "join" => {
-                if let [profile, channel] = args {
+                if let Some((profile, channel)) = resolve_join_args(state, args) {
                     out.outbound.push(OutboundCommand::Join {
-                        network: (*profile).to_owned(),
-                        channel: (*channel).to_owned(),
+                        network: profile.clone(),
+                        channel: channel.clone(),
                     });
                     out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                         command,
-                        detail: format!("Joining {channel}"),
+                        detail: format!("Joining {profile}/{channel}"),
                     }));
                 } else {
                     out.events
-                        .push(failed("join", "usage: /join <profile> <#channel>"));
+                        .push(failed("join", "usage: /join [profile] <#channel> (profile defaults to focused)"));
                 }
             }
             "part" => {
@@ -474,6 +474,22 @@ fn infer_target_from_focus(state: &AppState) -> Option<String> {
     })
 }
 
+/// Resolve join command arguments: /join [profile] <#channel>
+fn resolve_join_args(state: &AppState, args: &[&str]) -> Option<(String, String)> {
+    match args {
+        [channel] => {
+            // Single arg: infer profile from focused buffer
+            let profile = infer_profile_from_focus_or_single(state)?;
+            Some((profile, (*channel).to_owned()))
+        }
+        [profile, channel] => {
+            // Explicit profile and channel
+            Some(((*profile).to_owned(), (*channel).to_owned()))
+        }
+        _ => None,
+    }
+}
+
 fn resolve_part_args(state: &AppState, args: &[&str]) -> Option<(String, String, Option<String>)> {
     match args {
         [] => {
@@ -577,7 +593,7 @@ fn nick_usage(state: &AppState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::AppState;
+    use crate::model::{AppState, BufferId};
 
     #[test]
     fn alias_resolution_runs_join() {
@@ -590,6 +606,31 @@ mod tests {
             OutboundCommand::Join { network, channel } => {
                 assert_eq!(network, "net");
                 assert_eq!(channel, "#rust");
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_infers_profile_from_focus() {
+        let registry = CommandRegistry::default_registry();
+        let mut state = AppState::new(100, 1000);
+        // Set up a focused buffer in "myprofile"
+        state.ensure_buffer("myprofile", "#existing");
+        state.focus = Some(BufferId::new("myprofile", "#existing"));
+        state.networks.insert(
+            "myprofile".to_owned(),
+            crate::model::NetworkState::new("myprofile", "irc.example.com:6667"),
+        );
+
+        // Join with only channel name - should infer profile from focus
+        let output = registry.execute_line(&mut state, CommandSource::Slash, "/join #newchan");
+
+        assert_eq!(output.outbound.len(), 1);
+        match &output.outbound[0] {
+            OutboundCommand::Join { network, channel } => {
+                assert_eq!(network, "myprofile");
+                assert_eq!(channel, "#newchan");
             }
             other => panic!("unexpected outbound: {other:?}"),
         }
