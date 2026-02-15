@@ -46,11 +46,47 @@ enum ComposerMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FocusPane {
-    Servers,
-    Buffers,
+    Sidebar,
     Chat,
     Nicklist,
     Input,
+}
+
+/// Sidebar section type for collapse tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SidebarSection {
+    Channels,
+    Chats,
+}
+
+/// Represents a single item in the unified sidebar tree.
+#[derive(Debug, Clone)]
+enum SidebarItem {
+    Profile { name: String },
+    Status { profile: String },
+    ChannelsHeader { profile: String },
+    Channel { profile: String, name: String },
+    ChatsHeader { profile: String },
+    Chat { profile: String, name: String },
+}
+
+impl SidebarItem {
+    fn profile_section(&self) -> Option<(String, SidebarSection)> {
+        match self {
+            SidebarItem::ChannelsHeader { profile } => Some((profile.clone(), SidebarSection::Channels)),
+            SidebarItem::ChatsHeader { profile } => Some((profile.clone(), SidebarSection::Chats)),
+            _ => None,
+        }
+    }
+
+    fn buffer_id(&self) -> Option<(String, String)> {
+        match self {
+            SidebarItem::Status { profile } => Some((profile.clone(), "status".to_owned())),
+            SidebarItem::Channel { profile, name } => Some((profile.clone(), name.clone())),
+            SidebarItem::Chat { profile, name } => Some((profile.clone(), name.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// Stateful ratatui engine for rendering and keyboard handling.
@@ -72,8 +108,9 @@ pub struct UiEngine {
     nick_refs: Vec<String>,
     active_profile: Option<String>,
     focus_pane: FocusPane,
-    server_selected: usize,
-    buffer_selected: usize,
+    sidebar_selected: usize,
+    sidebar_items: Vec<SidebarItem>,
+    sidebar_collapse: HashMap<(String, SidebarSection), bool>,
     nick_selected: usize,
     composer: Option<ComposerMode>,
     input_history: InputHistory,
@@ -98,8 +135,7 @@ pub struct UiEngine {
     nicklist_filter: String,
     nicklist_filtering: bool,
     // Layout regions for mouse hit testing
-    region_servers: Option<Rect>,
-    region_buffers: Option<Rect>,
+    region_sidebar: Option<Rect>,
     region_chat: Option<Rect>,
     region_nicklist: Option<Rect>,
 }
@@ -136,8 +172,9 @@ impl UiEngine {
             nick_refs: Vec::new(),
             active_profile: None,
             focus_pane: FocusPane::Input,
-            server_selected: 0,
-            buffer_selected: 0,
+            sidebar_selected: 0,
+            sidebar_items: Vec::new(),
+            sidebar_collapse: HashMap::new(),
             nick_selected: 0,
             composer: None,
             input_history: InputHistory::new(500),
@@ -158,8 +195,7 @@ impl UiEngine {
             nicklist_scroll: 0,
             nicklist_filter: String::new(),
             nicklist_filtering: false,
-            region_servers: None,
-            region_buffers: None,
+            region_sidebar: None,
             region_chat: None,
             region_nicklist: None,
         }
@@ -302,141 +338,89 @@ impl UiEngine {
         let chat_area = top[chat_idx];
         let right_area = if self.show_right_sidebar { Some(top[top.len() - 1]) } else { None };
 
-        // Only create left layout if sidebar is visible
-        let left = left_area.map(|area| {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(4)])
-                .split(area)
-        });
-
         // Store layout regions for mouse hit testing
         self.region_chat = Some(chat_area);
         self.region_nicklist = right_area;
-        if let Some(ref left) = left {
-            self.region_servers = Some(left[0]);
-            self.region_buffers = Some(left[1]);
+        self.region_sidebar = left_area;
+
+        // Build unified sidebar items
+        self.sidebar_items = self.build_sidebar_items(vm);
+
+        // Clamp sidebar selection
+        if self.sidebar_items.is_empty() {
+            self.sidebar_selected = 0;
         } else {
-            self.region_servers = None;
-            self.region_buffers = None;
+            self.sidebar_selected = self.sidebar_selected.min(self.sidebar_items.len().saturating_sub(1));
         }
 
-        // Clamp selection indices after potential cache updates
-        if self.server_names.is_empty() {
-            self.server_selected = 0;
-        } else {
-            self.server_selected = self
-                .server_selected
-                .min(self.server_names.len().saturating_sub(1));
-        }
-
-        if self.buffer_refs.is_empty() {
-            self.buffer_selected = 0;
-        } else {
-            self.buffer_selected = self
-                .buffer_selected
-                .min(self.buffer_refs.len().saturating_sub(1));
-        }
-
-        let active_focus = vm
-            .active_buffer
-            .as_ref()
-            .map(|buffer| (buffer.id.network.clone(), buffer.id.name.clone()));
-        if let Some((network, name)) = active_focus.clone() {
-            if let Some(index) =
-                self.buffer_refs
-                    .iter()
-                    .position(|(candidate_network, candidate_name)| {
-                        candidate_network == &network && candidate_name == &name
-                    })
-            {
-                self.buffer_selected = index;
+        // Sync selection with active buffer
+        if let Some(ref buffer) = vm.active_buffer {
+            let target = (buffer.id.network.clone(), buffer.id.name.clone());
+            if let Some(idx) = self.sidebar_items.iter().position(|item| item.buffer_id() == Some(target.clone())) {
+                self.sidebar_selected = idx;
             }
+        }
 
-            if let Some(index) = self
-                .server_names
+        // Render unified sidebar
+        if let Some(sidebar_area) = left_area {
+            let sidebar_list_items: Vec<ListItem> = self
+                .sidebar_items
                 .iter()
-                .position(|candidate| candidate == &network)
-            {
-                self.server_selected = index;
+                .map(|item| {
+                    match item {
+                        SidebarItem::Profile { name } => {
+                            let connected = vm.networks.iter().any(|n| &n.name == name && n.connected);
+                            let icon = if connected { "●" } else { "○" };
+                            ListItem::new(Line::from(Span::styled(
+                                format!("{icon} {name}"),
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )))
+                        }
+                        SidebarItem::Status { profile: _ } => {
+                            ListItem::new(format!("  status"))
+                        }
+                        SidebarItem::ChannelsHeader { profile } => {
+                            let collapsed = self.sidebar_collapse.get(&(profile.clone(), SidebarSection::Channels)).copied().unwrap_or(false);
+                            let arrow = if collapsed { "▸" } else { "▾" };
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {arrow} channels"),
+                                Style::default().fg(Color::DarkGray),
+                            )))
+                        }
+                        SidebarItem::Channel { name, .. } => {
+                            ListItem::new(format!("    {name}"))
+                        }
+                        SidebarItem::ChatsHeader { profile } => {
+                            let collapsed = self.sidebar_collapse.get(&(profile.clone(), SidebarSection::Chats)).copied().unwrap_or(false);
+                            let arrow = if collapsed { "▸" } else { "▾" };
+                            ListItem::new(Line::from(Span::styled(
+                                format!("  {arrow} chats"),
+                                Style::default().fg(Color::DarkGray),
+                            )))
+                        }
+                        SidebarItem::Chat { name, .. } => {
+                            ListItem::new(format!("    {name}"))
+                        }
+                    }
+                })
+                .collect();
+
+            let mut sidebar_state = ListState::default();
+            if !sidebar_list_items.is_empty() {
+                sidebar_state.select(Some(self.sidebar_selected));
             }
-        }
 
-        let network_items = vm
-            .networks
-            .iter()
-            .map(|network| {
-                let icon = if network.connected { "*" } else { "o" };
-                ListItem::new(format!("{icon} {}", network.name))
-            })
-            .collect::<Vec<_>>();
-
-        let mut server_state = ListState::default();
-        if !network_items.is_empty() {
-            server_state.select(Some(self.server_selected));
-        }
-
-        // Render left sidebar if visible
-        if let Some(ref left) = left {
             frame.render_stateful_widget(
-                List::new(network_items)
-                    .highlight_style(focus_style(
-                        &self.theme,
-                        self.focus_pane == FocusPane::Servers,
-                    ))
-                    .block(
-                        Block::default()
-                            .title("Servers")
-                            .borders(Borders::ALL)
-                            .border_style(border_style(
-                                &self.theme,
-                                self.focus_pane == FocusPane::Servers,
-                            )),
-                    ),
-                left[0],
-                &mut server_state,
-            );
-        }
-
-        let buffer_items = vm
-            .buffers
-            .iter()
-            .map(|buffer| {
-                let unread = if buffer.unread > 0 {
-                    format!(" ({})", buffer.unread)
-                } else {
-                    String::new()
-                };
-                ListItem::new(format!(
-                    "{}/{} [{}]{}",
-                    buffer.id.network, buffer.id.name, buffer.nick_count, unread
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        let mut buffer_state = ListState::default();
-        if !buffer_items.is_empty() {
-            buffer_state.select(Some(self.buffer_selected));
-        }
-
-        if let Some(ref left) = left {
-            frame.render_stateful_widget(
-                List::new(buffer_items)
-                    .highlight_style(focus_style(
-                        &self.theme,
-                        self.focus_pane == FocusPane::Buffers,
-                    ))
+                List::new(sidebar_list_items)
+                    .highlight_style(focus_style(&self.theme, self.focus_pane == FocusPane::Sidebar))
                     .block(
                         Block::default()
                             .title("Buffers")
                             .borders(Borders::ALL)
-                            .border_style(border_style(
-                                &self.theme,
-                                self.focus_pane == FocusPane::Buffers,
-                            )),
+                            .border_style(border_style(&self.theme, self.focus_pane == FocusPane::Sidebar)),
                     ),
-                left[1],
-                &mut buffer_state,
+                sidebar_area,
+                &mut sidebar_state,
             );
         }
 
@@ -678,14 +662,9 @@ impl UiEngine {
                 } else if in_rect(self.region_chat) {
                     self.scroll_up_lines(3);
                     vec![UiIntent::Event(UiEvent::Tick)]
-                } else if in_rect(self.region_servers) {
-                    if self.server_selected > 0 {
-                        self.server_selected = self.server_selected.saturating_sub(1);
-                    }
-                    vec![UiIntent::Event(UiEvent::Tick)]
-                } else if in_rect(self.region_buffers) {
-                    if self.buffer_selected > 0 {
-                        self.buffer_selected = self.buffer_selected.saturating_sub(1);
+                } else if in_rect(self.region_sidebar) {
+                    if self.sidebar_selected > 0 {
+                        self.sidebar_selected = self.sidebar_selected.saturating_sub(1);
                     }
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else {
@@ -703,14 +682,9 @@ impl UiEngine {
                 } else if in_rect(self.region_chat) {
                     self.scroll_down_lines(3);
                     vec![UiIntent::Event(UiEvent::Tick)]
-                } else if in_rect(self.region_servers) {
-                    if !self.server_names.is_empty() {
-                        self.server_selected = (self.server_selected + 1).min(self.server_names.len().saturating_sub(1));
-                    }
-                    vec![UiIntent::Event(UiEvent::Tick)]
-                } else if in_rect(self.region_buffers) {
-                    if !self.buffer_refs.is_empty() {
-                        self.buffer_selected = (self.buffer_selected + 1).min(self.buffer_refs.len().saturating_sub(1));
+                } else if in_rect(self.region_sidebar) {
+                    if !self.sidebar_items.is_empty() {
+                        self.sidebar_selected = (self.sidebar_selected + 1).min(self.sidebar_items.len().saturating_sub(1));
                     }
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else {
@@ -719,28 +693,28 @@ impl UiEngine {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if in_rect(self.region_servers) {
-                    // Click on server list - select and focus
-                    if let Some(rect) = self.region_servers {
+                if in_rect(self.region_sidebar) {
+                    // Click on sidebar - select and possibly toggle collapse or switch buffer
+                    if let Some(rect) = self.region_sidebar {
                         let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize; // -1 for border
-                        if rel_y < self.server_names.len() {
-                            self.server_selected = rel_y;
-                            self.focus_pane = FocusPane::Servers;
-                        }
-                    }
-                    vec![UiIntent::Event(UiEvent::Tick)]
-                } else if in_rect(self.region_buffers) {
-                    // Click on buffer list - select and switch
-                    if let Some(rect) = self.region_buffers {
-                        let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize;
-                        if rel_y < self.buffer_refs.len() {
-                            self.buffer_selected = rel_y;
-                            self.focus_pane = FocusPane::Buffers;
-                            if let Some((network, name)) = self.buffer_refs.get(rel_y).cloned() {
-                                return vec![
-                                    UiIntent::Event(UiEvent::Tick),
-                                    UiIntent::SubmitLine(format!("/buffer {}/{}", network, name)),
-                                ];
+                        if rel_y < self.sidebar_items.len() {
+                            self.sidebar_selected = rel_y;
+                            self.focus_pane = FocusPane::Sidebar;
+                            
+                            // Handle click action based on item type
+                            if let Some(item) = self.sidebar_items.get(rel_y).cloned() {
+                                if let Some((profile, section)) = item.profile_section() {
+                                    // Toggle collapse for headers
+                                    let key = (profile, section);
+                                    let collapsed = self.sidebar_collapse.get(&key).copied().unwrap_or(false);
+                                    self.sidebar_collapse.insert(key, !collapsed);
+                                } else if let Some((network, name)) = item.buffer_id() {
+                                    // Switch to buffer
+                                    return vec![
+                                        UiIntent::Event(UiEvent::Tick),
+                                        UiIntent::SubmitLine(format!("/buffer {} {}", network, name)),
+                                    ];
+                                }
                             }
                         }
                     }
@@ -864,6 +838,25 @@ impl UiEngine {
                     && !self.nick_refs.is_empty() =>
             {
                 return self.open_pm_from_nicklist();
+            }
+            // Enter toggles collapse on sidebar headers, or switches to buffer
+            KeyCode::Enter
+                if self.focus_pane == FocusPane::Sidebar
+                    && self.composer.is_none() =>
+            {
+                if let Some(item) = self.sidebar_items.get(self.sidebar_selected).cloned() {
+                    if let Some((profile, section)) = item.profile_section() {
+                        // Toggle collapse for headers
+                        let key = (profile, section);
+                        let collapsed = self.sidebar_collapse.get(&key).copied().unwrap_or(false);
+                        self.sidebar_collapse.insert(key, !collapsed);
+                        return vec![UiIntent::Event(UiEvent::Tick)];
+                    } else if let Some((network, name)) = item.buffer_id() {
+                        // Switch to buffer
+                        return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
+                    }
+                }
+                return vec![UiIntent::Event(UiEvent::Tick)];
             }
             // "/" starts nicklist filter mode when nicklist is focused
             KeyCode::Char('/')
@@ -1338,8 +1331,7 @@ impl UiEngine {
         // Build available panes based on sidebar visibility
         let mut panes = Vec::new();
         if self.show_left_sidebar {
-            panes.push(FocusPane::Servers);
-            panes.push(FocusPane::Buffers);
+            panes.push(FocusPane::Sidebar);
         }
         panes.push(FocusPane::Chat);
         if self.show_right_sidebar {
@@ -1363,41 +1355,26 @@ impl UiEngine {
 
     fn navigate_focused_pane(&mut self, direction: i8) -> Vec<UiIntent> {
         match self.focus_pane {
-            FocusPane::Servers => {
-                if self.server_names.is_empty() {
+            FocusPane::Sidebar => {
+                if self.sidebar_items.is_empty() {
                     return Vec::new();
                 }
                 if direction < 0 {
-                    self.server_selected = self
-                        .server_selected
+                    self.sidebar_selected = self
+                        .sidebar_selected
                         .checked_sub(1)
-                        .unwrap_or(self.server_names.len().saturating_sub(1));
+                        .unwrap_or(self.sidebar_items.len().saturating_sub(1));
                 } else {
-                    self.server_selected = (self.server_selected + 1) % self.server_names.len();
+                    self.sidebar_selected = (self.sidebar_selected + 1) % self.sidebar_items.len();
                 }
-
-                let Some(profile) = self.server_names.get(self.server_selected).cloned() else {
-                    return Vec::new();
-                };
-                vec![UiIntent::SubmitLine(format!("/buffer {profile} status"))]
-            }
-            FocusPane::Buffers => {
-                if self.buffer_refs.is_empty() {
-                    return Vec::new();
+                
+                // If navigating to a buffer item, switch to it
+                if let Some(item) = self.sidebar_items.get(self.sidebar_selected) {
+                    if let Some((network, name)) = item.buffer_id() {
+                        return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
+                    }
                 }
-                if direction < 0 {
-                    self.buffer_selected = self
-                        .buffer_selected
-                        .checked_sub(1)
-                        .unwrap_or(self.buffer_refs.len().saturating_sub(1));
-                } else {
-                    self.buffer_selected = (self.buffer_selected + 1) % self.buffer_refs.len();
-                }
-                let Some((profile, buffer)) = self.buffer_refs.get(self.buffer_selected).cloned()
-                else {
-                    return Vec::new();
-                };
-                vec![UiIntent::SubmitLine(format!("/buffer {profile} {buffer}"))]
+                vec![UiIntent::Event(UiEvent::Tick)]
             }
             FocusPane::Chat => {
                 if direction < 0 {
@@ -1423,6 +1400,70 @@ impl UiEngine {
             }
             FocusPane::Input => Vec::new(),
         }
+    }
+
+    /// Build the sidebar items tree from the view model.
+    fn build_sidebar_items(&self, vm: &AppViewModel) -> Vec<SidebarItem> {
+        let mut items = Vec::new();
+
+        for network in &vm.networks {
+            let profile = &network.name;
+            
+            // Profile header
+            items.push(SidebarItem::Profile { name: profile.clone() });
+            
+            // Status buffer
+            items.push(SidebarItem::Status { profile: profile.clone() });
+            
+            // Collect channels and chats for this profile
+            let mut channels: Vec<String> = Vec::new();
+            let mut chats: Vec<String> = Vec::new();
+            
+            for buf in &vm.buffers {
+                if &buf.id.network != profile || buf.id.name == "status" {
+                    continue;
+                }
+                if buf.id.name.starts_with('#') || buf.id.name.starts_with('&') {
+                    channels.push(buf.id.name.clone());
+                } else {
+                    chats.push(buf.id.name.clone());
+                }
+            }
+            
+            // Channels section (if any)
+            if !channels.is_empty() {
+                let collapsed = self.sidebar_collapse
+                    .get(&(profile.clone(), SidebarSection::Channels))
+                    .copied()
+                    .unwrap_or(false);
+                    
+                items.push(SidebarItem::ChannelsHeader { profile: profile.clone() });
+                
+                if !collapsed {
+                    for chan in channels {
+                        items.push(SidebarItem::Channel { profile: profile.clone(), name: chan });
+                    }
+                }
+            }
+            
+            // Chats section (if any)
+            if !chats.is_empty() {
+                let collapsed = self.sidebar_collapse
+                    .get(&(profile.clone(), SidebarSection::Chats))
+                    .copied()
+                    .unwrap_or(false);
+                    
+                items.push(SidebarItem::ChatsHeader { profile: profile.clone() });
+                
+                if !collapsed {
+                    for chat in chats {
+                        items.push(SidebarItem::Chat { profile: profile.clone(), name: chat });
+                    }
+                }
+            }
+        }
+        
+        items
     }
 
     fn open_pm_from_nicklist(&mut self) -> Vec<UiIntent> {
