@@ -134,16 +134,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
     }
 
-    if state.buffers.is_empty() {
-        state.ensure_buffer("local", "status");
-    }
-
-    let focus_missing = match state.focus.as_ref() {
-        Some(buffer_id) => !state.buffers.contains_key(buffer_id),
-        None => true,
-    };
-    if focus_missing {
-        state.focus = Some(tirc_core::BufferId::new("local", "status"));
+    // Validate focus points to an existing buffer
+    if let Some(ref buffer_id) = state.focus {
+        if !state.buffers.contains_key(buffer_id) {
+            state.focus = state.buffers.keys().next().cloned();
+        }
     }
 
     let mut terminal = setup_terminal()?;
@@ -686,8 +681,11 @@ async fn execute_command_line(
                                     format!("{}:{}", profile_cfg.host, profile_cfg.port),
                                 )
                             });
+                        // Create profile status buffer and log connecting message there
+                        let status_buf = state.ensure_buffer(&profile_cfg.name, "status");
+                        state.focus.get_or_insert(status_buf);
                         state.push_message(
-                            "local",
+                            &profile_cfg.name,
                             "status",
                             tirc_core::Message {
                                 ts: Utc::now(),
