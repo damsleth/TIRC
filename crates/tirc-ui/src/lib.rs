@@ -2,7 +2,9 @@
 
 pub mod engine;
 pub mod input;
+pub mod mouse;
 pub mod palette;
+pub mod render;
 
 pub use engine::{UiEngine, UiIntent};
 pub use input::{InputEditor, InputHistory};
