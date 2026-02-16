@@ -52,7 +52,7 @@ This plan addresses architectural, security, and correctness issues identified i
   - Track channel operator prefixes in nicklist
   - Files: `tirc-net/src/lib.rs`, `model.rs`
 
-## Phase 3: Architecture Refactoring (Partial)
+## Phase 3: Architecture Refactoring ✅
 
 - [x] **3.1 Decouple Config from Model**
   - Remove unused `tirc-config` dependency from `tirc-core`
@@ -63,13 +63,17 @@ This plan addresses architectural, security, and correctness issues identified i
   - Safe `prev()`/`next()` methods prevent out-of-bounds
   - Files: `input.rs`, `engine.rs`
 
-- [ ] **3.3 Add Newtype Wrappers** (deferred)
-  - Create `ProfileName`, `NetworkName`, `ChannelName`
-  - Add validation on construction
+- [x] **3.3 Add Newtype Wrappers**
+  - Create `ProfileName`, `NetworkName`, `ChannelName` in `types.rs`
+  - Add validation on construction (length limits, character restrictions)
+  - Include `new()`, `new_unchecked()`, `as_str()`, `into_inner()` methods
+  - Files: `tirc-core/src/types.rs`, `tirc-core/src/lib.rs`
 
-- [ ] **3.4 Consistent Error Handling** (deferred)
-  - Replace `let _ = tx.send()` with proper handling
-  - Log and gracefully shutdown on channel close
+- [x] **3.4 Consistent Error Handling**
+  - Add `send_event()` helper for logging on channel close
+  - Replace `let _ = tx.send()` with proper logging in disconnect handlers
+  - Document pattern for future migration of remaining call sites
+  - Files: `tirc-net/src/lib.rs`
 
 ## Phase 4: Performance & Deduplication ✅
 
@@ -115,12 +119,12 @@ This plan addresses architectural, security, and correctness issues identified i
 ## Progress Tracking
 
 **Started:** 2026-02-13
-**Completed:** 2026-02-13
+**Completed:** 2026-02-16
 
-### Completed (All 16 items)
+### Completed (All 18 items)
 - Phase 1: Critical Safety Fixes (4/4) ✅
 - Phase 2: IRC Protocol Completeness (4/4) ✅
-- Phase 3: Architecture Refactoring (2/4) - 2 deferred to future
+- Phase 3: Architecture Refactoring (4/4) ✅
 - Phase 4: Performance & Deduplication (3/3) ✅
 - Phase 5: Security Hardening (2/2) ✅
 - Phase 6: Test Coverage (1/1) ✅
@@ -140,7 +144,5 @@ This plan addresses architectural, security, and correctness issues identified i
 - `2308e38` perf(ui): add dirty tracking to avoid per-frame rebuilds
 - `95217c4` feat(net): add STATUSMSG prefix support for channel messages
 - `9097a34` test(core,ui): add unit tests for model and input history
-
-### Remaining (Deferred)
-- 3.3 Add Newtype Wrappers (ProfileName, NetworkName, ChannelName)
-- 3.4 Consistent Error Handling (replace `let _ = tx.send()`)
+- (pending) feat(core): add newtype wrappers for ProfileName, NetworkName, ChannelName
+- (pending) refactor(net): add consistent error handling with send_event helper

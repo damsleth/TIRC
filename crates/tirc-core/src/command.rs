@@ -177,13 +177,16 @@ impl CommandRegistry {
         }
 
         let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
-        let parts = stripped.split_whitespace().collect::<Vec<_>>();
-        if parts.is_empty() {
+        // Parse arguments with quote support for profile names with spaces
+        let parts_owned = parse_command_args(stripped);
+        if parts_owned.is_empty() {
             return out;
         }
 
-        let command = self.resolve_command(parts[0]);
-        let args = &parts[1..];
+        let command = self.resolve_command(&parts_owned[0]);
+        // Convert to &str slices for pattern matching compatibility
+        let args_refs: Vec<&str> = parts_owned[1..].iter().map(String::as_str).collect();
+        let args = args_refs.as_slice();
 
         match command.as_str() {
             "help" => {
@@ -590,6 +593,57 @@ fn nick_usage(state: &AppState) -> String {
     }
 }
 
+/// Parse command arguments supporting quoted strings.
+/// 
+/// Handles both single and double quotes. Unquoted arguments are split by whitespace.
+/// Examples:
+/// - `profile "My Server"` -> ["profile", "My Server"]
+/// - `"My Profile" #channel` -> ["My Profile", "#channel"]
+/// - `simple args` -> ["simple", "args"]
+fn parse_command_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char: char = '"';
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == quote_char {
+                // End of quoted string
+                in_quotes = false;
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            } else {
+                current.push(c);
+            }
+        } else if c == '"' || c == '\'' {
+            // Start of quoted string
+            in_quotes = true;
+            quote_char = c;
+            // Push any pending unquoted content
+            if !current.is_empty() {
+                args.push(std::mem::take(&mut current));
+            }
+        } else if c.is_whitespace() {
+            // End of unquoted argument
+            if !current.is_empty() {
+                args.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(c);
+        }
+    }
+
+    // Push any remaining content
+    if !current.is_empty() {
+        args.push(current);
+    }
+
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +764,49 @@ mod tests {
             output.outbound.first(),
             Some(OutboundCommand::Disconnect { network }) if network == "default"
         ));
+    }
+
+    #[test]
+    fn parse_command_args_simple() {
+        let args = parse_command_args("connect myprofile");
+        assert_eq!(args, vec!["connect", "myprofile"]);
+    }
+
+    #[test]
+    fn parse_command_args_quoted() {
+        let args = parse_command_args(r#"connect "My Profile""#);
+        assert_eq!(args, vec!["connect", "My Profile"]);
+    }
+
+    #[test]
+    fn parse_command_args_single_quoted() {
+        let args = parse_command_args("connect 'Profile With Spaces'");
+        assert_eq!(args, vec!["connect", "Profile With Spaces"]);
+    }
+
+    #[test]
+    fn parse_command_args_multiple_quoted() {
+        let args = parse_command_args("\"My Profile\" #test message");
+        assert_eq!(args, vec!["My Profile", "#test", "message"]);
+    }
+
+    #[test]
+    fn connect_with_quoted_profile() {
+        let registry = CommandRegistry::default_registry();
+        let mut state = AppState::new(100, 1000);
+
+        let output = registry.execute_line(
+            &mut state,
+            CommandSource::Slash,
+            r#"/connect "My Profile Name""#,
+        );
+
+        assert_eq!(output.outbound.len(), 1);
+        match &output.outbound[0] {
+            OutboundCommand::Connect { profile } => {
+                assert_eq!(profile, "My Profile Name");
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
     }
 }

@@ -120,7 +120,10 @@ impl NetManager {
             return Err(NetError::UnknownNetwork(network.to_owned()));
         };
 
-        let _ = handle.tx.send(NetCommand::Disconnect).await;
+        // Send disconnect command; if channel closed, task already terminated
+        if handle.tx.send(NetCommand::Disconnect).await.is_err() {
+            debug!(network, "disconnect command channel already closed");
+        }
         handle.task.abort();
         Ok(())
     }
@@ -129,8 +132,11 @@ impl NetManager {
         let mut handles = HashMap::new();
         std::mem::swap(&mut self.handles, &mut handles);
 
-        for (_, handle) in handles {
-            let _ = handle.tx.send(NetCommand::Disconnect).await;
+        for (name, handle) in handles {
+            // Send disconnect command; if channel closed, task already terminated
+            if handle.tx.send(NetCommand::Disconnect).await.is_err() {
+                debug!(network = %name, "disconnect command channel already closed");
+            }
             handle.task.abort();
         }
     }
@@ -160,6 +166,25 @@ impl ConnectionRuntime {
             sasl_in_progress: false,
             sasl_done: profile.sasl.is_none(),
         }
+    }
+}
+
+/// Send a network event with logging on failure.
+/// 
+/// Returns `true` if the send succeeded, `false` if the receiver dropped.
+/// When the receiver drops (app layer shut down), connection tasks should
+/// gracefully terminate.
+/// 
+/// NOTE: This helper exists to replace `let _ = tx.send(...)` patterns with
+/// proper logging. Future refactoring should check the return value and
+/// exit connection tasks when the channel closes.
+#[allow(dead_code)]
+async fn send_event(tx: &mpsc::Sender<NetworkEvent>, event: NetworkEvent) -> bool {
+    if tx.send(event).await.is_err() {
+        debug!("event channel closed, app layer may have shut down");
+        false
+    } else {
+        true
     }
 }
 

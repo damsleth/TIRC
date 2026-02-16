@@ -5,6 +5,7 @@ pub mod event;
 pub mod log;
 pub mod model;
 pub mod session;
+pub mod types;
 
 pub use command::{CommandOutput, CommandRegistry, CommandSpec, OutboundCommand};
 pub use event::{AppEvent, CommandEvent, CommandSource, NetworkEvent, TimerEvent, UiAction, UiEvent};
@@ -16,3 +17,4 @@ pub use model::{
 pub use session::{
     ReconnectState, SessionState, build_session_snapshot, load_session, save_session,
 };
+pub use types::{ChannelName, NameValidationError, NameValidationErrorKind, NetworkName, ProfileName};
