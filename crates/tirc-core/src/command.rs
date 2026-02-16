@@ -177,25 +177,43 @@ impl CommandRegistry {
         }
 
         let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
-        // Parse arguments with quote and escape support.
-        let parts_owned = match parse_command_args(stripped) {
-            Ok(parts) => parts,
-            Err(err) => {
-                let command = stripped.split_whitespace().next().unwrap_or("input");
-                out.events.push(failed(
-                    command,
-                    &format!("failed to parse command arguments: {err}"),
-                ));
-                return out;
-            }
-        };
-        if parts_owned.is_empty() {
+
+        // Extract command name with simple whitespace split first.
+        let (cmd_str, rest) = stripped
+            .split_once(char::is_whitespace)
+            .map(|(c, r)| (c, r.trim_start()))
+            .unwrap_or((stripped, ""));
+
+        if cmd_str.is_empty() {
             return out;
         }
 
-        let command = self.resolve_command(&parts_owned[0]);
-        // Convert to &str slices for pattern matching compatibility
-        let args_refs: Vec<&str> = parts_owned[1..].iter().map(String::as_str).collect();
+        let command = self.resolve_command(cmd_str);
+
+        // Commands with freeform trailing text (chat messages, part reasons)
+        // use simple whitespace splitting to preserve literal quotes and backslashes.
+        // Commands that benefit from quoted arguments (profile names with spaces)
+        // use the quote-aware parser.
+        let uses_raw_args = matches!(
+            command.as_str(),
+            "msg" | "part" | "help" | "theme" | "keymap" | "quit"
+        );
+        let parts_owned = if uses_raw_args || rest.is_empty() {
+            rest.split_whitespace().map(String::from).collect::<Vec<_>>()
+        } else {
+            match parse_command_args(rest) {
+                Ok(parts) => parts,
+                Err(err) => {
+                    out.events.push(failed(
+                        cmd_str,
+                        &format!("failed to parse command arguments: {err}"),
+                    ));
+                    return out;
+                }
+            }
+        };
+
+        let args_refs: Vec<&str> = parts_owned.iter().map(String::as_str).collect();
         let args = args_refs.as_slice();
 
         match command.as_str() {
@@ -620,6 +638,8 @@ impl std::fmt::Display for CommandArgParseError {
     }
 }
 
+impl std::error::Error for CommandArgParseError {}
+
 /// Parse command arguments supporting quoted strings and `\` escapes.
 ///
 /// Handles both single and double quotes. Unquoted arguments are split by whitespace.
@@ -864,12 +884,47 @@ mod tests {
     fn execute_line_reports_parse_error() {
         let registry = CommandRegistry::default_registry();
         let mut state = AppState::new(100, 1000);
-        let output = registry.execute_line(&mut state, CommandSource::Slash, r#"/msg #rust "oops"#);
+        // Use /connect which goes through the quote-aware parser
+        let output =
+            registry.execute_line(&mut state, CommandSource::Slash, r#"/connect "oops"#);
 
         assert!(matches!(
             output.events.first(),
             Some(AppEvent::Command(CommandEvent::Failed { command, .. }))
-                if command == "msg"
+                if command == "connect"
+        ));
+    }
+
+    #[test]
+    fn msg_preserves_literal_quotes_and_backslashes() {
+        let registry = CommandRegistry::default_registry();
+        let mut state = AppState::new(100, 1000);
+        state.networks.insert(
+            "net".to_owned(),
+            crate::model::NetworkState::new("net", "irc.example.com:6667"),
+        );
+        state.focus = Some(BufferId::new("net", "#rust"));
+
+        // Quotes should be preserved literally in message body
+        let output = registry.execute_line(
+            &mut state,
+            CommandSource::Slash,
+            r#"/msg #rust "hello world""#,
+        );
+        assert!(matches!(
+            &output.outbound[0],
+            OutboundCommand::Msg { body, .. } if body == r#""hello world""#
+        ));
+
+        // Backslashes should be preserved literally
+        let output = registry.execute_line(
+            &mut state,
+            CommandSource::Slash,
+            r"/msg #rust C:\Users\path",
+        );
+        assert!(matches!(
+            &output.outbound[0],
+            OutboundCommand::Msg { body, .. } if body == r"C:\Users\path"
         ));
     }
 

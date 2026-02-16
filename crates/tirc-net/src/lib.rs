@@ -120,12 +120,8 @@ impl NetManager {
             return Err(NetError::UnknownNetwork(network.to_owned()));
         };
 
-        // Send disconnect command; if channel closed, task is already shutting down.
-        if handle.tx.send(NetCommand::Disconnect).await.is_err() {
-            debug!(network, "disconnect command channel already closed");
-        } else if !handle.task.is_finished() {
-            handle.task.abort();
-        }
+        let _ = handle.tx.send(NetCommand::Disconnect).await;
+        handle.task.abort();
         Ok(())
     }
 
@@ -133,13 +129,9 @@ impl NetManager {
         let mut handles = HashMap::new();
         std::mem::swap(&mut self.handles, &mut handles);
 
-        for (name, handle) in handles {
-            // Send disconnect command; if channel closed, task is already shutting down.
-            if handle.tx.send(NetCommand::Disconnect).await.is_err() {
-                debug!(network = %name, "disconnect command channel already closed");
-            } else if !handle.task.is_finished() {
-                handle.task.abort();
-            }
+        for (_, handle) in handles {
+            let _ = handle.tx.send(NetCommand::Disconnect).await;
+            handle.task.abort();
         }
     }
 }

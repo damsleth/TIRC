@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -66,24 +67,24 @@ enum SidebarSection {
 enum SidebarItem {
     /// Profile header
     Profile {
-        name: String,
+        name: Rc<str>,
     },
     /// Status buffer under a profile
     Status {
-        profile: String,
+        profile: Rc<str>,
     },
     ChannelsHeader {
-        profile: String,
+        profile: Rc<str>,
     },
     Channel {
-        profile: String,
+        profile: Rc<str>,
         name: String,
     },
     ChatsHeader {
-        profile: String,
+        profile: Rc<str>,
     },
     Chat {
-        profile: String,
+        profile: Rc<str>,
         name: String,
     },
 }
@@ -92,20 +93,45 @@ impl SidebarItem {
     fn profile_section(&self) -> Option<(String, SidebarSection)> {
         match self {
             SidebarItem::ChannelsHeader { profile } => {
-                Some((profile.clone(), SidebarSection::Channels))
+                Some((profile.to_string(), SidebarSection::Channels))
             }
-            SidebarItem::ChatsHeader { profile } => Some((profile.clone(), SidebarSection::Chats)),
+            SidebarItem::ChatsHeader { profile } => {
+                Some((profile.to_string(), SidebarSection::Chats))
+            }
             _ => None,
         }
     }
 
     fn buffer_id(&self) -> Option<(String, String)> {
         match self {
-            SidebarItem::Status { profile } => Some((profile.clone(), "status".to_owned())),
-            SidebarItem::Channel { profile, name } => Some((profile.clone(), name.clone())),
-            SidebarItem::Chat { profile, name } => Some((profile.clone(), name.clone())),
+            SidebarItem::Status { profile } => Some((profile.to_string(), "status".to_owned())),
+            SidebarItem::Channel { profile, name } => {
+                Some((profile.to_string(), name.clone()))
+            }
+            SidebarItem::Chat { profile, name } => Some((profile.to_string(), name.clone())),
             _ => None,
         }
+    }
+}
+
+/// Encapsulates sidebar items and their pre-computed buffer indices.
+///
+/// Ensures the two data structures always stay in sync — `buffer_indices`
+/// is recomputed whenever `items` is rebuilt.
+#[derive(Debug, Clone, Default)]
+struct SidebarTree {
+    items: Vec<SidebarItem>,
+    buffer_indices: Vec<usize>,
+}
+
+impl SidebarTree {
+    fn rebuild(&mut self, items: Vec<SidebarItem>) {
+        self.buffer_indices = items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| item.buffer_id().is_some().then_some(idx))
+            .collect();
+        self.items = items;
     }
 }
 
@@ -129,8 +155,7 @@ pub struct UiEngine {
     active_profile: Option<String>,
     focus_pane: FocusPane,
     sidebar_selected: usize,
-    sidebar_items: Vec<SidebarItem>,
-    sidebar_buffer_indices: Vec<usize>,
+    sidebar: SidebarTree,
     sidebar_collapse: HashMap<(String, SidebarSection), bool>,
     nick_selected: usize,
     composer: Option<ComposerMode>,
@@ -195,8 +220,7 @@ impl UiEngine {
             active_profile: None,
             focus_pane: FocusPane::Input,
             sidebar_selected: 0,
-            sidebar_items: Vec::new(),
-            sidebar_buffer_indices: Vec::new(),
+            sidebar: SidebarTree::default(),
             sidebar_collapse: HashMap::new(),
             nick_selected: 0,
             composer: None,
@@ -379,28 +403,24 @@ impl UiEngine {
         self.region_input = Some(root[2]);
 
         // Build unified sidebar items
-        self.sidebar_items = self.build_sidebar_items(vm);
-        self.sidebar_buffer_indices = self
-            .sidebar_items
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| item.buffer_id().is_some().then_some(idx))
-            .collect();
+        let items = self.build_sidebar_items(vm);
+        self.sidebar.rebuild(items);
 
         // Clamp sidebar selection
-        if self.sidebar_items.is_empty() {
+        if self.sidebar.items.is_empty() {
             self.sidebar_selected = 0;
         } else {
             self.sidebar_selected = self
                 .sidebar_selected
-                .min(self.sidebar_items.len().saturating_sub(1));
+                .min(self.sidebar.items.len().saturating_sub(1));
         }
 
         // Sync selection with active buffer
         if let Some(ref buffer) = vm.active_buffer {
             let target = (buffer.id.network.clone(), buffer.id.name.clone());
             if let Some(idx) = self
-                .sidebar_items
+                .sidebar
+                .items
                 .iter()
                 .position(|item| item.buffer_id() == Some(target.clone()))
             {
@@ -411,11 +431,13 @@ impl UiEngine {
         // Render unified sidebar
         if let Some(sidebar_area) = left_area {
             let sidebar_list_items: Vec<ListItem> = self
-                .sidebar_items
+                .sidebar
+                .items
                 .iter()
                 .map(|item| match item {
                     SidebarItem::Profile { name } => {
-                        let connected = vm.networks.iter().any(|n| &n.name == name && n.connected);
+                        let connected =
+                            vm.networks.iter().any(|n| n.name.as_str() == &**name && n.connected);
                         let icon = if connected { "●" } else { "○" };
                         ListItem::new(Line::from(Span::styled(
                             format!("{icon} {name}"),
@@ -426,7 +448,7 @@ impl UiEngine {
                     SidebarItem::ChannelsHeader { profile } => {
                         let collapsed = self
                             .sidebar_collapse
-                            .get(&(profile.clone(), SidebarSection::Channels))
+                            .get(&(profile.to_string(), SidebarSection::Channels))
                             .copied()
                             .unwrap_or(false);
                         let arrow = if collapsed { "▸" } else { "▾" };
@@ -439,7 +461,7 @@ impl UiEngine {
                     SidebarItem::ChatsHeader { profile } => {
                         let collapsed = self
                             .sidebar_collapse
-                            .get(&(profile.clone(), SidebarSection::Chats))
+                            .get(&(profile.to_string(), SidebarSection::Chats))
                             .copied()
                             .unwrap_or(false);
                         let arrow = if collapsed { "▸" } else { "▾" };
@@ -746,9 +768,9 @@ impl UiEngine {
                     self.scroll_down_lines(3);
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else if in_rect(self.region_sidebar) {
-                    if !self.sidebar_items.is_empty() {
+                    if !self.sidebar.items.is_empty() {
                         self.sidebar_selected = (self.sidebar_selected + 1)
-                            .min(self.sidebar_items.len().saturating_sub(1));
+                            .min(self.sidebar.items.len().saturating_sub(1));
                     }
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else {
@@ -761,12 +783,12 @@ impl UiEngine {
                     // Click on sidebar - select and possibly toggle collapse or switch buffer
                     if let Some(rect) = self.region_sidebar {
                         let rel_y = (pos.1 - rect.y).saturating_sub(1) as usize; // -1 for border
-                        if rel_y < self.sidebar_items.len() {
+                        if rel_y < self.sidebar.items.len() {
                             self.sidebar_selected = rel_y;
                             self.focus_pane = FocusPane::Sidebar;
 
                             // Handle click action based on item type
-                            if let Some(item) = self.sidebar_items.get(rel_y).cloned() {
+                            if let Some(item) = self.sidebar.items.get(rel_y).cloned() {
                                 if let Some((profile, section)) = item.profile_section() {
                                     // Toggle collapse for headers
                                     let key = (profile, section);
@@ -919,7 +941,7 @@ impl UiEngine {
             }
             // Enter toggles collapse on sidebar headers, or switches to buffer
             KeyCode::Enter if self.focus_pane == FocusPane::Sidebar && self.composer.is_none() => {
-                if let Some(item) = self.sidebar_items.get(self.sidebar_selected).cloned() {
+                if let Some(item) = self.sidebar.items.get(self.sidebar_selected).cloned() {
                     if let Some((profile, section)) = item.profile_section() {
                         // Toggle collapse for headers
                         let key = (profile, section);
@@ -1430,17 +1452,18 @@ impl UiEngine {
     fn navigate_focused_pane(&mut self, direction: i8) -> Vec<UiIntent> {
         match self.focus_pane {
             FocusPane::Sidebar => {
-                if self.sidebar_items.is_empty() {
+                if self.sidebar.items.is_empty() {
                     return Vec::new();
                 }
 
-                if self.sidebar_buffer_indices.is_empty() {
+                if self.sidebar.buffer_indices.is_empty() {
                     return vec![UiIntent::Event(UiEvent::Tick)];
                 }
 
-                let idx_len = self.sidebar_buffer_indices.len();
+                let idx_len = self.sidebar.buffer_indices.len();
                 let current_pos = self
-                    .sidebar_buffer_indices
+                    .sidebar
+                    .buffer_indices
                     .iter()
                     .position(|idx| *idx == self.sidebar_selected);
                 let next_pos = match current_pos {
@@ -1451,9 +1474,9 @@ impl UiEngine {
                     None if direction < 0 => idx_len.saturating_sub(1),
                     None => 0,
                 };
-                self.sidebar_selected = self.sidebar_buffer_indices[next_pos];
+                self.sidebar_selected = self.sidebar.buffer_indices[next_pos];
 
-                if let Some(item) = self.sidebar_items.get(self.sidebar_selected) {
+                if let Some(item) = self.sidebar.items.get(self.sidebar_selected) {
                     if let Some((network, name)) = item.buffer_id() {
                         return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
                     }
@@ -1505,16 +1528,20 @@ impl UiEngine {
     /// Find the section key for the currently selected sidebar item.
     /// Returns the (profile, section) key if the item belongs to a collapsible section.
     fn find_section_for_selected(&self) -> Option<(String, SidebarSection)> {
-        let item = self.sidebar_items.get(self.sidebar_selected)?;
+        let item = self.sidebar.items.get(self.sidebar_selected)?;
         match item {
             SidebarItem::ChannelsHeader { profile } => {
-                Some((profile.clone(), SidebarSection::Channels))
+                Some((profile.to_string(), SidebarSection::Channels))
             }
             SidebarItem::Channel { profile, .. } => {
-                Some((profile.clone(), SidebarSection::Channels))
+                Some((profile.to_string(), SidebarSection::Channels))
             }
-            SidebarItem::ChatsHeader { profile } => Some((profile.clone(), SidebarSection::Chats)),
-            SidebarItem::Chat { profile, .. } => Some((profile.clone(), SidebarSection::Chats)),
+            SidebarItem::ChatsHeader { profile } => {
+                Some((profile.to_string(), SidebarSection::Chats))
+            }
+            SidebarItem::Chat { profile, .. } => {
+                Some((profile.to_string(), SidebarSection::Chats))
+            }
             _ => None,
         }
     }
@@ -1524,14 +1551,14 @@ impl UiEngine {
         let mut items = Vec::new();
 
         for network in &vm.networks {
-            let profile = &network.name;
+            let profile: Rc<str> = Rc::from(network.name.as_str());
 
             // Profile header and status buffer entry.
             items.push(SidebarItem::Profile {
-                name: profile.clone(),
+                name: Rc::clone(&profile),
             });
             items.push(SidebarItem::Status {
-                profile: profile.clone(),
+                profile: Rc::clone(&profile),
             });
 
             // Collect channels and chats for this profile
@@ -1539,7 +1566,7 @@ impl UiEngine {
             let mut chats: Vec<String> = Vec::new();
 
             for buf in &vm.buffers {
-                if &buf.id.network != profile || buf.id.name == "status" {
+                if buf.id.network.as_str() != &*profile || buf.id.name == "status" {
                     continue;
                 }
                 if buf.id.name.starts_with('#') || buf.id.name.starts_with('&') {
@@ -1553,18 +1580,18 @@ impl UiEngine {
             if !channels.is_empty() {
                 let collapsed = self
                     .sidebar_collapse
-                    .get(&(profile.clone(), SidebarSection::Channels))
+                    .get(&(profile.to_string(), SidebarSection::Channels))
                     .copied()
                     .unwrap_or(false);
 
                 items.push(SidebarItem::ChannelsHeader {
-                    profile: profile.clone(),
+                    profile: Rc::clone(&profile),
                 });
 
                 if !collapsed {
                     for chan in channels {
                         items.push(SidebarItem::Channel {
-                            profile: profile.clone(),
+                            profile: Rc::clone(&profile),
                             name: chan,
                         });
                     }
@@ -1575,18 +1602,18 @@ impl UiEngine {
             if !chats.is_empty() {
                 let collapsed = self
                     .sidebar_collapse
-                    .get(&(profile.clone(), SidebarSection::Chats))
+                    .get(&(profile.to_string(), SidebarSection::Chats))
                     .copied()
                     .unwrap_or(false);
 
                 items.push(SidebarItem::ChatsHeader {
-                    profile: profile.clone(),
+                    profile: Rc::clone(&profile),
                 });
 
                 if !collapsed {
                     for chat in chats {
                         items.push(SidebarItem::Chat {
-                            profile: profile.clone(),
+                            profile: Rc::clone(&profile),
                             name: chat,
                         });
                     }
