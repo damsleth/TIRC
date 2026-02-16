@@ -826,12 +826,8 @@ impl UiEngine {
                                 if let Some((profile, section)) = item.profile_section() {
                                     // Toggle collapse for headers
                                     let key = (profile, section);
-                                    let collapsed = self
-                                        .sidebar
-                                        .collapse
-                                        .get(&key)
-                                        .copied()
-                                        .unwrap_or(false);
+                                    let collapsed =
+                                        self.sidebar.collapse.get(&key).copied().unwrap_or(false);
                                     self.sidebar.collapse.insert(key, !collapsed);
                                 } else if let Some((network, name)) = item.buffer_id() {
                                     // Switch to buffer
@@ -988,18 +984,11 @@ impl UiEngine {
             }
             // Enter toggles collapse on sidebar headers, or switches to buffer
             KeyCode::Enter if self.focus_pane == FocusPane::Sidebar && self.composer.is_none() => {
-                if let Some(item) = self
-                    .sidebar
-                    .tree
-                    .items
-                    .get(self.sidebar.selected)
-                    .cloned()
-                {
+                if let Some(item) = self.sidebar.tree.items.get(self.sidebar.selected).cloned() {
                     if let Some((profile, section)) = item.profile_section() {
                         // Toggle collapse for headers
                         let key = (profile, section);
-                        let collapsed =
-                            self.sidebar.collapse.get(&key).copied().unwrap_or(false);
+                        let collapsed = self.sidebar.collapse.get(&key).copied().unwrap_or(false);
                         self.sidebar.collapse.insert(key, !collapsed);
                         return vec![UiIntent::Event(UiEvent::Tick)];
                     } else if let Some((network, name)) = item.buffer_id() {
@@ -1305,7 +1294,8 @@ impl UiEngine {
         if self.caches.connected_profiles.len() > 1 {
             self.palette_mode = PaletteMode::JoinProfile;
             self.palette.clear_query();
-            self.palette.set_items(self.caches.connected_profiles.clone());
+            self.palette
+                .set_items(self.caches.connected_profiles.clone());
             self.palette_open = true;
             return Vec::new();
         }
@@ -1347,7 +1337,8 @@ impl UiEngine {
         if self.caches.connected_profiles.len() > 1 {
             self.palette_mode = PaletteMode::MsgProfile;
             self.palette.clear_query();
-            self.palette.set_items(self.caches.connected_profiles.clone());
+            self.palette
+                .set_items(self.caches.connected_profiles.clone());
             return Vec::new();
         }
 
@@ -1684,12 +1675,7 @@ impl UiEngine {
         let Some(profile) = self.caches.active_profile.clone() else {
             return Vec::new();
         };
-        let Some(target) = self
-            .nicklist
-            .refs
-            .get(self.nicklist.selected)
-            .cloned()
-        else {
+        let Some(target) = self.nicklist.refs.get(self.nicklist.selected).cloned() else {
             return Vec::new();
         };
         let target = strip_nick_prefix(&target).to_owned();
@@ -1701,7 +1687,6 @@ impl UiEngine {
     }
 
     fn lookup_action(&self, key: KeyEvent) -> Option<UiAction> {
-
         let canonical = canonical_key(key);
         self.keymap_actions.get(&canonical).copied()
     }

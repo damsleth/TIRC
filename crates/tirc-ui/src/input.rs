@@ -116,7 +116,7 @@ impl InputEditor {
 }
 
 /// Safe wrapper for input history navigation.
-/// 
+///
 /// Encapsulates history entries, current navigation index, and draft text
 /// to prevent out-of-bounds access and ensure consistent state.
 #[derive(Debug, Clone, Default)]
@@ -185,7 +185,9 @@ impl InputHistory {
             }
         }
 
-        self.index.and_then(|idx| self.entries.get(idx)).map(String::as_str)
+        self.index
+            .and_then(|idx| self.entries.get(idx))
+            .map(String::as_str)
     }
 
     /// Navigate to newer (more recent) entry. Returns the text to display, if any.
