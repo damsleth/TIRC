@@ -36,7 +36,7 @@ Implemented all 25 findings from QA_REPORT.md. Summary of changes:
 ### MEDIUM (9/9 fixed)
 - **#10** AppRuntime struct scaffolding for future extraction
 - **#11** Busy-poll main loop → `tokio::select!` with crossterm EventStream
-- **#12** UiEngine subsystem extraction deferred (scaffolding only — structural risk too high)
+- **#12** UiEngine subsystem extraction: sidebar/nicklist/chat/layout state grouped into structs
 - **#13** UserQuit broadcasts to all channels → only relevant channels via membership tracking
 - **#14** No rate limiting → token-bucket rate limiter (5 burst, 2/sec refill)
 - **#15** Double join/part events → eliminated premature channel events
