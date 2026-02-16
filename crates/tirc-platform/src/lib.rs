@@ -38,6 +38,7 @@ impl PlatformNotifier {
     }
 
     /// Sends a desktop notification when supported.
+    #[allow(unused_variables)]
     pub fn notify(&self, title: &str, body: &str) -> Result<(), PlatformError> {
         if !self.enable_macos_notifications {
             return Ok(());
