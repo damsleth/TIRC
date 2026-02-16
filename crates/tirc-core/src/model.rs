@@ -534,7 +534,8 @@ impl AppState {
                 if should_reset {
                     entries.clear();
                     // Clear index entries for this network
-                    self.channel_list_index.retain(|(net, _), _| net != &network);
+                    self.channel_list_index
+                        .retain(|(net, _), _| net != &network);
                 }
                 let key = (network.clone(), channel.clone());
                 if let Some(&idx) = self.channel_list_index.get(&key) {
@@ -553,7 +554,8 @@ impl AppState {
                 // If the refresh completed without items, clear stale cached entries.
                 if self.channel_list_refresh_pending.remove(&network) {
                     self.channel_list_cache.insert(network.clone(), Vec::new());
-                    self.channel_list_index.retain(|(net, _), _| net != &network);
+                    self.channel_list_index
+                        .retain(|(net, _), _| net != &network);
                 } else {
                     self.channel_list_cache.entry(network).or_default();
                 }
@@ -780,7 +782,7 @@ mod tests {
                 network: "test".to_string(),
                 channel: format!("#channel{}", i),
                 users: i as u32,
-                topic: "".to_string(),
+                topic: String::new(),
             }));
         }
 

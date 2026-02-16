@@ -894,7 +894,8 @@ async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut
         Some(err) => state.set_status_for(
             format!(
                 "Closed buffer {}/{} (part failed: {err})",
-                focus.network(), focus.name()
+                focus.network(),
+                focus.name()
             ),
             Duration::from_millis(2_000),
         ),

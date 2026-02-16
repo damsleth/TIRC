@@ -7,7 +7,9 @@ pub mod model;
 pub mod session;
 
 pub use command::{CommandOutput, CommandRegistry, CommandSpec, OutboundCommand};
-pub use event::{AppEvent, CommandEvent, CommandSource, NetworkEvent, TimerEvent, UiAction, UiEvent};
+pub use event::{
+    AppEvent, CommandEvent, CommandSource, NetworkEvent, TimerEvent, UiAction, UiEvent,
+};
 pub use log::{LogRecord, LogWriter};
 pub use model::{
     ActiveBufferView, AppState, AppViewModel, BufferId, BufferState, BufferView, ChannelListEntry,

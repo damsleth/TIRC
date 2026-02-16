@@ -199,7 +199,9 @@ impl CommandRegistry {
             "msg" | "part" | "help" | "theme" | "keymap" | "quit"
         );
         let parts_owned = if uses_raw_args || rest.is_empty() {
-            rest.split_whitespace().map(String::from).collect::<Vec<_>>()
+            rest.split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>()
         } else {
             match parse_command_args(rest) {
                 Ok(parts) => parts,
@@ -547,7 +549,9 @@ fn resolve_part_args(state: &AppState, args: &[&str]) -> Option<(String, String,
             };
             Some((profile, (*first).to_owned(), reason))
         }
-        [profile, second, rest @ ..] if state.networks.contains_key(*profile) && is_channel_name(second) => {
+        [profile, second, rest @ ..]
+            if state.networks.contains_key(*profile) && is_channel_name(second) =>
+        {
             // /part profile #channel [reason...]
             let reason = if rest.is_empty() {
                 None
@@ -863,7 +867,7 @@ mod tests {
 
     #[test]
     fn parse_command_args_trailing_escape() {
-        let err = parse_command_args(r#"msg #rust test\"#).unwrap_err();
+        let err = parse_command_args(r"msg #rust test\").unwrap_err();
         assert_eq!(err, CommandArgParseError::TrailingEscape);
     }
 
@@ -872,8 +876,7 @@ mod tests {
         let registry = CommandRegistry::default_registry();
         let mut state = AppState::new(100, 1000);
         // Use /connect which goes through the quote-aware parser
-        let output =
-            registry.execute_line(&mut state, CommandSource::Slash, r#"/connect "oops"#);
+        let output = registry.execute_line(&mut state, CommandSource::Slash, r#"/connect "oops"#);
 
         assert!(matches!(
             output.events.first(),
