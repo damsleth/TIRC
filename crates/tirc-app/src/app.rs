@@ -249,7 +249,10 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
     }
 
-    let session = build_session_snapshot(&state);
+    let mut session = build_session_snapshot(&state);
+    // Clear transient buffer restore cache on clean exit.
+    session.open_buffers.clear();
+    session.focused_buffer = None;
     if let Err(err) = save_session(&paths.session_file, &session).await {
         warn!("failed to save final session: {err}");
     }
@@ -336,11 +339,7 @@ async fn handle_ui_intents(
                     continue;
                 }
                 if selected == "kill buffer" {
-                    ui.open_close_confirmation();
-                    state.set_status_for(
-                        "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
-                        Duration::from_millis(2_000),
-                    );
+                    open_close_prompt(state, ui);
                     continue;
                 }
                 if selected == "reload config" {
@@ -364,11 +363,7 @@ async fn handle_ui_intents(
                 side_effects.reload_config = true;
             }
             UiIntent::Event(UiEvent::Action(UiAction::BufferCloseConfirm)) => {
-                ui.open_close_confirmation();
-                state.set_status_for(
-                    "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
-                    Duration::from_millis(2_000),
-                );
+                open_close_prompt(state, ui);
             }
             UiIntent::Event(UiEvent::Action(UiAction::BufferCloseCurrent)) => {
                 close_focused_buffer(state, net_manager).await;
@@ -380,11 +375,7 @@ async fn handle_ui_intents(
                 }
 
                 if is_close_without_args(&line) {
-                    ui.open_close_confirmation();
-                    state.set_status_for(
-                        "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
-                        Duration::from_millis(2_000),
-                    );
+                    open_close_prompt(state, ui);
                     continue;
                 }
 
@@ -659,6 +650,9 @@ async fn execute_command_line(
                         format!("list failed: {err}"),
                         Duration::from_millis(2_000),
                     );
+                } else {
+                    let status_buf = state.ensure_buffer(&network, "status");
+                    state.focus = Some(status_buf);
                 }
             }
             tirc_core::OutboundCommand::Connect { profile } => {
@@ -804,6 +798,19 @@ fn is_close_without_args(line: &str) -> bool {
         })
         .unwrap_or(false);
     is_close && parts.next().is_none()
+}
+
+fn open_close_prompt(state: &mut tirc_core::AppState, ui: &mut UiEngine) {
+    if state.buffers.is_empty() {
+        ui.open_no_buffers_notice();
+        state.set_status_for("There are no open buffers", Duration::from_millis(2_000));
+    } else {
+        ui.open_close_confirmation();
+        state.set_status_for(
+            "Close focused buffer? Press y/Enter to confirm, n/Esc to cancel",
+            Duration::from_millis(2_000),
+        );
+    }
 }
 
 async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut NetManager) {

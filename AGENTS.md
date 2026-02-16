@@ -88,6 +88,12 @@ cargo fmt --all                # Format
 - Error types per crate in `error.rs`
 - Public API exports via `lib.rs`
 
+## Commit Discipline
+
+- Update `DEVLOG.md` as part of every commit.
+- Each commit entry should summarize what changed, why it changed, and any follow-up work.
+- Keep `DEVLOG.md` in sync with git history to avoid drift between implementation and documentation.
+
 ## When Modifying
 
 1. **Adding commands:** Edit `command.rs`, add to `CommandRegistry::default_registry()`

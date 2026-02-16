@@ -40,6 +40,12 @@ enum EditorKind {
     Keymap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseDialogMode {
+    ConfirmClose,
+    NoOpenBuffers,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComposerMode {
     JoinChannel { profile: String },
@@ -105,9 +111,7 @@ impl SidebarItem {
     fn buffer_id(&self) -> Option<(String, String)> {
         match self {
             SidebarItem::Status { profile } => Some((profile.to_string(), "status".to_owned())),
-            SidebarItem::Channel { profile, name } => {
-                Some((profile.to_string(), name.clone()))
-            }
+            SidebarItem::Channel { profile, name } => Some((profile.to_string(), name.clone())),
             SidebarItem::Chat { profile, name } => Some((profile.to_string(), name.clone())),
             _ => None,
         }
@@ -146,7 +150,7 @@ pub struct UiEngine {
     palette_mode: PaletteMode,
     theme_editor: SelectionEditor,
     keymap_editor: SelectionEditor,
-    close_confirm_open: bool,
+    close_dialog: Option<CloseDialogMode>,
     connected_profiles: Vec<String>,
     channel_list_cache: BTreeMap<String, Vec<tirc_core::ChannelListEntry>>,
     server_names: Vec<String>,
@@ -172,7 +176,6 @@ pub struct UiEngine {
     last_network_count: usize,
     last_connected_count: usize,
     last_buffer_count: usize,
-    last_channel_list_len: usize,
     // Sidebar visibility
     show_left_sidebar: bool,
     show_right_sidebar: bool,
@@ -211,7 +214,7 @@ impl UiEngine {
             palette_mode: PaletteMode::Normal,
             theme_editor: SelectionEditor::with_options(theme_options, active_theme),
             keymap_editor: SelectionEditor::with_options(keymap_options, active_keymap),
-            close_confirm_open: false,
+            close_dialog: None,
             connected_profiles: Vec::new(),
             channel_list_cache: BTreeMap::new(),
             server_names: Vec::new(),
@@ -236,7 +239,6 @@ impl UiEngine {
             last_network_count: 0,
             last_connected_count: 0,
             last_buffer_count: 0,
-            last_channel_list_len: 0,
             show_left_sidebar: true,
             show_right_sidebar: true,
             nicklist_scroll: 0,
@@ -301,7 +303,11 @@ impl UiEngine {
     }
 
     pub fn open_close_confirmation(&mut self) {
-        self.close_confirm_open = true;
+        self.close_dialog = Some(CloseDialogMode::ConfirmClose);
+    }
+
+    pub fn open_no_buffers_notice(&mut self) {
+        self.close_dialog = Some(CloseDialogMode::NoOpenBuffers);
     }
 
     pub fn max_idle_interval(&self) -> Duration {
@@ -320,7 +326,6 @@ impl UiEngine {
         let connected_count = vm.networks.iter().filter(|n| n.connected).count();
         let network_count = vm.networks.len();
         let buffer_count = vm.buffers.len();
-        let channel_list_len = vm.channel_list_cache.values().map(|v| v.len()).sum();
 
         if network_count != self.last_network_count || connected_count != self.last_connected_count
         {
@@ -341,9 +346,9 @@ impl UiEngine {
             }
         }
 
-        // Only clone channel list cache when it changes
-        if channel_list_len != self.last_channel_list_len {
-            self.last_channel_list_len = channel_list_len;
+        // Keep an exact cache copy so channel/user/topic updates are reflected even if
+        // the total list length doesn't change.
+        if self.channel_list_cache != vm.channel_list_cache {
             self.channel_list_cache = vm.channel_list_cache.clone();
         }
 
@@ -436,8 +441,10 @@ impl UiEngine {
                 .iter()
                 .map(|item| match item {
                     SidebarItem::Profile { name } => {
-                        let connected =
-                            vm.networks.iter().any(|n| n.name.as_str() == &**name && n.connected);
+                        let connected = vm
+                            .networks
+                            .iter()
+                            .any(|n| n.name.as_str() == &**name && n.connected);
                         let icon = if connected { "●" } else { "○" };
                         ListItem::new(Line::from(Span::styled(
                             format!("{icon} {name}"),
@@ -708,8 +715,8 @@ impl UiEngine {
             );
         }
 
-        if self.close_confirm_open {
-            render_close_confirmation(frame, area);
+        if let Some(mode) = self.close_dialog {
+            render_close_confirmation(frame, area, mode == CloseDialogMode::NoOpenBuffers);
         }
     }
 
@@ -857,19 +864,28 @@ impl UiEngine {
             }
         }
 
-        if self.close_confirm_open {
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.close_confirm_open = false;
-                    return vec![UiIntent::Event(UiEvent::Action(
-                        UiAction::BufferCloseCurrent,
-                    ))];
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.close_confirm_open = false;
-                    return Vec::new();
-                }
-                _ => return Vec::new(),
+        if let Some(mode) = self.close_dialog {
+            match mode {
+                CloseDialogMode::ConfirmClose => match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.close_dialog = None;
+                        return vec![UiIntent::Event(UiEvent::Action(
+                            UiAction::BufferCloseCurrent,
+                        ))];
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.close_dialog = None;
+                        return Vec::new();
+                    }
+                    _ => return Vec::new(),
+                },
+                CloseDialogMode::NoOpenBuffers => match key.code {
+                    KeyCode::Enter | KeyCode::Esc => {
+                        self.close_dialog = None;
+                        return Vec::new();
+                    }
+                    _ => return Vec::new(),
+                },
             }
         }
 
@@ -1174,10 +1190,7 @@ impl UiEngine {
                 self.palette_open = false;
                 vec![UiIntent::Event(UiEvent::Action(action))]
             }
-            UiAction::BufferCloseConfirm => {
-                self.close_confirm_open = true;
-                vec![UiIntent::Event(UiEvent::Tick)]
-            }
+            UiAction::BufferCloseConfirm => vec![UiIntent::Event(UiEvent::Action(action))],
             UiAction::InputHome => {
                 self.input.move_home();
                 Vec::new()
@@ -1539,9 +1552,7 @@ impl UiEngine {
             SidebarItem::ChatsHeader { profile } => {
                 Some((profile.to_string(), SidebarSection::Chats))
             }
-            SidebarItem::Chat { profile, .. } => {
-                Some((profile.to_string(), SidebarSection::Chats))
-            }
+            SidebarItem::Chat { profile, .. } => Some((profile.to_string(), SidebarSection::Chats)),
             _ => None,
         }
     }

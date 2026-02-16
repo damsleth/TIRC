@@ -78,7 +78,7 @@ impl NetworkState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelListEntry {
     pub channel: String,
     pub users: u32,
@@ -131,6 +131,8 @@ pub struct AppState {
     pub max_channel_list_entries: usize,
     pub channel_list_cache: BTreeMap<String, Vec<ChannelListEntry>>,
     #[serde(skip)]
+    channel_list_refresh_pending: BTreeSet<String>,
+    #[serde(skip)]
     status_locked_until: Option<DateTime<Utc>>,
 }
 
@@ -149,6 +151,7 @@ impl AppState {
             max_scrollback_lines,
             max_channel_list_entries,
             channel_list_cache: BTreeMap::new(),
+            channel_list_refresh_pending: BTreeSet::new(),
             status_locked_until: None,
         }
     }
@@ -309,7 +312,7 @@ impl AppState {
                 } else {
                     format!("{nick} has quit")
                 };
-                
+
                 // Remove the user from all channel nick lists and post quit message to affected channels
                 for channel in &channels {
                     let id = BufferId {
@@ -322,7 +325,7 @@ impl AppState {
                             let plain_nick = n.trim_start_matches(&['@', '+', '%', '&', '~'][..]);
                             plain_nick != nick
                         });
-                        
+
                         // Post quit message to this channel
                         buffer.messages.push_back(Message {
                             ts: Utc::now(),
@@ -362,19 +365,19 @@ impl AppState {
                     (None, Some(r)) => format!("{kicked_nick} was kicked ({r})"),
                     (None, None) => format!("{kicked_nick} was kicked"),
                 };
-                
+
                 let id = BufferId {
                     network: network.clone(),
                     name: channel.clone(),
                 };
-                
+
                 if let Some(buffer) = self.buffers.get_mut(&id) {
                     // Remove kicked user from nicklist
                     buffer.nicklist.retain(|n| {
                         let plain_nick = n.trim_start_matches(&['@', '+', '%', '&', '~'][..]);
                         plain_nick != kicked_nick
                     });
-                    
+
                     // Post kick message
                     buffer.messages.push_back(Message {
                         ts: Utc::now(),
@@ -383,13 +386,13 @@ impl AppState {
                         mention: false,
                         tags: BTreeMap::new(),
                     });
-                    
+
                     // Enforce scrollback limit
                     while buffer.messages.len() > self.max_scrollback_lines {
                         buffer.messages.pop_front();
                     }
                 }
-                
+
                 // If we were kicked, remove channel and set status
                 if was_self {
                     if let Some(net_state) = self.networks.get_mut(&network) {
@@ -411,13 +414,13 @@ impl AppState {
                         network: network.clone(),
                         name: target.clone(),
                     };
-                    
+
                     if let Some(buffer) = self.buffers.get_mut(&id) {
                         // Parse mode changes and update nick prefixes
                         // Format: +ooo nick1 nick2 nick3 or +o-v nick1 nick2
                         let mut adding = true;
                         let mut arg_idx = 0;
-                        
+
                         for ch in modes.chars() {
                             match ch {
                                 '+' => adding = true,
@@ -433,10 +436,11 @@ impl AppState {
                                             'v' => '+', // voice
                                             _ => continue,
                                         };
-                                        
+
                                         // Find and update the nick in nicklist
                                         for entry in &mut buffer.nicklist {
-                                            let plain = entry.trim_start_matches(&['~', '&', '@', '%', '+'][..]);
+                                            let plain = entry
+                                                .trim_start_matches(&['~', '&', '@', '%', '+'][..]);
                                             if plain == nick {
                                                 if adding {
                                                     // Add prefix if not already present
@@ -466,14 +470,14 @@ impl AppState {
                                 _ => {} // Other modes don't consume args
                             }
                         }
-                        
+
                         // Display mode change in channel
                         let mode_msg = if let Some(setter) = set_by {
                             format!("{setter} sets mode: {modes} {}", args.join(" "))
                         } else {
                             format!("Mode: {modes} {}", args.join(" "))
                         };
-                        
+
                         buffer.messages.push_back(Message {
                             ts: Utc::now(),
                             sender: None,
@@ -481,7 +485,7 @@ impl AppState {
                             mention: false,
                             tags: BTreeMap::new(),
                         });
-                        
+
                         while buffer.messages.len() > self.max_scrollback_lines {
                             buffer.messages.pop_front();
                         }
@@ -502,7 +506,9 @@ impl AppState {
                 }
             }
             NetworkEvent::ChannelListStart { network } => {
-                self.channel_list_cache.insert(network, Vec::new());
+                // Keep the previous cached list available until the first new item arrives.
+                self.channel_list_refresh_pending.insert(network.clone());
+                self.channel_list_cache.entry(network).or_default();
             }
             NetworkEvent::ChannelListItem {
                 network,
@@ -510,7 +516,11 @@ impl AppState {
                 users,
                 topic,
             } => {
+                let should_reset = self.channel_list_refresh_pending.remove(&network);
                 let entries = self.channel_list_cache.entry(network).or_default();
+                if should_reset {
+                    entries.clear();
+                }
                 if let Some(existing) = entries.iter_mut().find(|entry| entry.channel == channel) {
                     existing.users = users;
                     existing.topic = topic;
@@ -520,7 +530,12 @@ impl AppState {
                 // Silently drop entries beyond max_channel_list_entries to prevent memory exhaustion
             }
             NetworkEvent::ChannelListEnd { network } => {
-                self.channel_list_cache.entry(network).or_default();
+                // If the refresh completed without items, clear stale cached entries.
+                if self.channel_list_refresh_pending.remove(&network) {
+                    self.channel_list_cache.insert(network, Vec::new());
+                } else {
+                    self.channel_list_cache.entry(network).or_default();
+                }
             }
             NetworkEvent::Message {
                 network,
@@ -737,7 +752,7 @@ mod tests {
     #[test]
     fn test_channel_list_cache_bounded() {
         let mut state = test_state();
-        
+
         // Add 15 entries - should only keep 10
         for i in 0..15 {
             state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
@@ -747,10 +762,10 @@ mod tests {
                 topic: "".to_string(),
             }));
         }
-        
+
         let entries = state.channel_list_cache.get("test").unwrap();
         assert_eq!(entries.len(), 10, "Should be bounded to max 10 entries");
-        
+
         // First 10 channels should be present
         assert_eq!(entries[0].channel, "#channel0");
         assert_eq!(entries[9].channel, "#channel9");
@@ -759,7 +774,7 @@ mod tests {
     #[test]
     fn test_channel_list_updates_existing() {
         let mut state = test_state();
-        
+
         // Add a channel
         state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
             network: "test".to_string(),
@@ -767,7 +782,7 @@ mod tests {
             users: 100,
             topic: "Old topic".to_string(),
         }));
-        
+
         // Update same channel
         state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
             network: "test".to_string(),
@@ -775,7 +790,7 @@ mod tests {
             users: 150,
             topic: "New topic".to_string(),
         }));
-        
+
         let entries = state.channel_list_cache.get("test").unwrap();
         assert_eq!(entries.len(), 1, "Should not duplicate");
         assert_eq!(entries[0].users, 150);
@@ -783,18 +798,76 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_list_start_keeps_previous_cache_until_first_item() {
+        let mut state = test_state();
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+            network: "test".to_string(),
+            channel: "#old".to_string(),
+            users: 10,
+            topic: "old topic".to_string(),
+        }));
+
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListStart {
+            network: "test".to_string(),
+        }));
+
+        let entries = state.channel_list_cache.get("test").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].channel, "#old");
+
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+            network: "test".to_string(),
+            channel: "#new".to_string(),
+            users: 20,
+            topic: "new topic".to_string(),
+        }));
+
+        let entries = state.channel_list_cache.get("test").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].channel, "#new");
+    }
+
+    #[test]
+    fn test_channel_list_end_without_items_clears_cache() {
+        let mut state = test_state();
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListItem {
+            network: "test".to_string(),
+            channel: "#stale".to_string(),
+            users: 10,
+            topic: "stale".to_string(),
+        }));
+
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListStart {
+            network: "test".to_string(),
+        }));
+        state.apply(AppEvent::Network(NetworkEvent::ChannelListEnd {
+            network: "test".to_string(),
+        }));
+
+        let entries = state.channel_list_cache.get("test").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
     fn test_user_quit_removes_from_nicklist() {
         let mut state = test_state();
-        
+
         // Setup: create network and buffer with users
-        state.networks.insert("test".to_string(), NetworkState::new("test", "irc.test.net"));
+        state.networks.insert(
+            "test".to_string(),
+            NetworkState::new("test", "irc.test.net"),
+        );
         state.networks.get_mut("test").unwrap().connected = true;
-        
+
         let buffer_id = BufferId::new("test", "#channel");
         let mut buffer = BufferState::new(buffer_id.clone());
-        buffer.nicklist = vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()];
+        buffer.nicklist = vec![
+            "alice".to_string(),
+            "bob".to_string(),
+            "charlie".to_string(),
+        ];
         state.buffers.insert(buffer_id.clone(), buffer);
-        
+
         // User quits
         state.apply(AppEvent::Network(NetworkEvent::UserQuit {
             network: "test".to_string(),
@@ -802,7 +875,7 @@ mod tests {
             reason: Some("Goodbye".to_string()),
             channels: vec!["#channel".to_string()],
         }));
-        
+
         let buffer = state.buffers.get(&buffer_id).unwrap();
         assert_eq!(buffer.nicklist.len(), 2);
         assert!(!buffer.nicklist.contains(&"bob".to_string()));
@@ -811,16 +884,19 @@ mod tests {
     #[test]
     fn test_kicked_removes_from_nicklist() {
         let mut state = test_state();
-        
+
         // Setup
-        state.networks.insert("test".to_string(), NetworkState::new("test", "irc.test.net"));
+        state.networks.insert(
+            "test".to_string(),
+            NetworkState::new("test", "irc.test.net"),
+        );
         state.networks.get_mut("test").unwrap().connected = true;
-        
+
         let buffer_id = BufferId::new("test", "#channel");
         let mut buffer = BufferState::new(buffer_id.clone());
         buffer.nicklist = vec!["alice".to_string(), "bob".to_string()];
         state.buffers.insert(buffer_id.clone(), buffer);
-        
+
         // User kicked
         state.apply(AppEvent::Network(NetworkEvent::Kicked {
             network: "test".to_string(),
@@ -830,7 +906,7 @@ mod tests {
             reason: Some("rule violation".to_string()),
             was_self: false,
         }));
-        
+
         let buffer = state.buffers.get(&buffer_id).unwrap();
         assert_eq!(buffer.nicklist.len(), 1);
         assert!(!buffer.nicklist.contains(&"alice".to_string()));

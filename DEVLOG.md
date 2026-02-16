@@ -1,0 +1,17 @@
+# DEVLOG
+- `4a191f1` fix: bound channel_list_cache to prevent memory exhaustion
+- `17bc3f2` fix: limit nick collision retries to prevent infinite loop
+- `0793015` refactor: replace magic action strings with UiAction enum
+- `7a7d34b` feat(log): implement secret redaction for sensitive data
+- `fe9530f` feat(net): implement CTCP support
+- `e665dad` feat(net): implement proper QUIT handling
+- `d1d9c4c` feat(net): implement proper KICK handling
+- `8a7380d` feat(net): implement MODE tracking
+- `15f9217` refactor(core): remove unused tirc-config dependency
+- `1e021f1` refactor(ui): create InputHistory wrapper for safe history navigation
+- `b2bc838` feat(security): enforce TLS by default with plaintext warning
+- `2308e38` perf(ui): add dirty tracking to avoid per-frame rebuilds
+- `95217c4` feat(net): add STATUSMSG prefix support for channel messages
+- `9097a34` test(core,ui): add unit tests for model and input history
+- (pending) feat(core): add newtype wrappers for ProfileName, NetworkName, ChannelName
+- (pending) refactor(net): add consistent error handling with send_event helper

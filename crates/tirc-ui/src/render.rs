@@ -73,7 +73,9 @@ pub enum PaletteMode {
     #[default]
     Normal,
     JoinProfile,
-    JoinChannel { profile: String },
+    JoinChannel {
+        profile: String,
+    },
     MsgProfile,
 }
 
@@ -232,16 +234,25 @@ pub fn render_selection_editor(
 }
 
 /// Render the close buffer confirmation popup.
-pub fn render_close_confirmation(frame: &mut Frame, area: Rect) {
+pub fn render_close_confirmation(frame: &mut Frame, area: Rect, no_open_buffers: bool) {
     let popup = centered_rect(46, 20, area);
     frame.render_widget(Clear, popup);
+
+    let (title, message) = if no_open_buffers {
+        (
+            "No Open Buffers",
+            "There are no open buffers. Press Enter or Esc to continue.",
+        )
+    } else {
+        (
+            "Confirm Close",
+            "Close the currently focused buffer? Press y/Enter to confirm, n/Esc to cancel.",
+        )
+    };
+
     frame.render_widget(
-        Paragraph::new("Close the currently focused buffer? (y/n)")
-            .block(
-                Block::default()
-                    .title("Confirm Close")
-                    .borders(Borders::ALL),
-            )
+        Paragraph::new(message)
+            .block(Block::default().title(title).borders(Borders::ALL))
             .wrap(Wrap { trim: true }),
         popup,
     );
