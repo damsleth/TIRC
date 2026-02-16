@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -6,11 +7,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{AppEvent, NetworkEvent, UiAction, UiEvent};
 
+/// Check whether a buffer/target name is an IRC channel.
+///
+/// Per RFC 2812: channels start with `#`, `&`, `+`, or `!`.
+/// Channel names cannot contain NUL, BELL, CR, LF, SPACE, COMMA, or COLON.
+pub fn is_channel_name(name: &str) -> bool {
+    matches!(name.as_bytes().first(), Some(b'#' | b'&' | b'+' | b'!'))
+}
+
 /// Unique buffer identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BufferId {
-    pub network: String,
-    pub name: String,
+    network: String,
+    name: String,
 }
 
 impl BufferId {
@@ -19,6 +28,14 @@ impl BufferId {
             network: network.into(),
             name: name.into(),
         }
+    }
+
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -96,7 +113,7 @@ impl ChannelListEntry {
 }
 
 /// Command palette state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PaletteState {
     pub open: bool,
     pub query: String,
@@ -104,19 +121,10 @@ pub struct PaletteState {
     pub results: Vec<String>,
 }
 
-impl Default for PaletteState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            query: String::new(),
-            selected: 0,
-            results: Vec::new(),
-        }
-    }
-}
-
 /// In-memory app state reduced from events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Not serializable — use purpose-built DTOs (e.g. `SessionState`) for persistence.
+#[derive(Debug, Clone)]
 pub struct AppState {
     pub networks: BTreeMap<String, NetworkState>,
     pub buffers: BTreeMap<BufferId, BufferState>,
@@ -130,9 +138,9 @@ pub struct AppState {
     pub max_scrollback_lines: usize,
     pub max_channel_list_entries: usize,
     pub channel_list_cache: BTreeMap<String, Vec<ChannelListEntry>>,
-    #[serde(skip)]
+    /// Index from (network, channel_name) -> position in channel_list_cache vec.
+    channel_list_index: HashMap<(String, String), usize>,
     channel_list_refresh_pending: BTreeSet<String>,
-    #[serde(skip)]
     status_locked_until: Option<DateTime<Utc>>,
 }
 
@@ -151,6 +159,7 @@ impl AppState {
             max_scrollback_lines,
             max_channel_list_entries,
             channel_list_cache: BTreeMap::new(),
+            channel_list_index: HashMap::new(),
             channel_list_refresh_pending: BTreeSet::new(),
             status_locked_until: None,
         }
@@ -313,7 +322,7 @@ impl AppState {
                     format!("{nick} has quit")
                 };
 
-                // Remove the user from all channel nick lists and post quit message to affected channels
+                // Remove the user from all channel nick lists and post quit message only to affected channels
                 for channel in &channels {
                     let id = BufferId {
                         network: network.clone(),
@@ -321,22 +330,26 @@ impl AppState {
                     };
                     if let Some(buffer) = self.buffers.get_mut(&id) {
                         // Remove user from nicklist (accounting for mode prefixes like @, +)
+                        let len_before = buffer.nicklist.len();
                         buffer.nicklist.retain(|n| {
                             let plain_nick = n.trim_start_matches(&['@', '+', '%', '&', '~'][..]);
                             plain_nick != nick
                         });
+                        let was_present = buffer.nicklist.len() < len_before;
 
-                        // Post quit message to this channel
-                        buffer.messages.push_back(Message {
-                            ts: Utc::now(),
-                            sender: None,
-                            body: quit_msg.clone(),
-                            mention: false,
-                            tags: BTreeMap::new(),
-                        });
-                        // Enforce scrollback limit
-                        while buffer.messages.len() > self.max_scrollback_lines {
-                            buffer.messages.pop_front();
+                        // Only post quit message if the user was actually in this channel
+                        if was_present {
+                            buffer.messages.push_back(Message {
+                                ts: Utc::now(),
+                                sender: None,
+                                body: quit_msg.clone(),
+                                mention: false,
+                                tags: BTreeMap::new(),
+                            });
+                            // Enforce scrollback limit
+                            while buffer.messages.len() > self.max_scrollback_lines {
+                                buffer.messages.pop_front();
+                            }
                         }
                     }
                 }
@@ -409,7 +422,7 @@ impl AppState {
                 set_by,
             } => {
                 // Check if this is a channel mode change (affects nick prefixes)
-                if target.starts_with('#') || target.starts_with('&') {
+                if is_channel_name(&target) {
                     let id = BufferId {
                         network: network.clone(),
                         name: target.clone(),
@@ -517,22 +530,30 @@ impl AppState {
                 topic,
             } => {
                 let should_reset = self.channel_list_refresh_pending.remove(&network);
-                let entries = self.channel_list_cache.entry(network).or_default();
+                let entries = self.channel_list_cache.entry(network.clone()).or_default();
                 if should_reset {
                     entries.clear();
+                    // Clear index entries for this network
+                    self.channel_list_index.retain(|(net, _), _| net != &network);
                 }
-                if let Some(existing) = entries.iter_mut().find(|entry| entry.channel == channel) {
-                    existing.users = users;
-                    existing.topic = topic;
+                let key = (network.clone(), channel.clone());
+                if let Some(&idx) = self.channel_list_index.get(&key) {
+                    if let Some(existing) = entries.get_mut(idx) {
+                        existing.users = users;
+                        existing.topic = topic;
+                    }
                 } else if entries.len() < self.max_channel_list_entries {
-                    entries.push(ChannelListEntry::new(channel, users, topic));
+                    let idx = entries.len();
+                    entries.push(ChannelListEntry::new(channel.clone(), users, topic));
+                    self.channel_list_index.insert(key, idx);
                 }
                 // Silently drop entries beyond max_channel_list_entries to prevent memory exhaustion
             }
             NetworkEvent::ChannelListEnd { network } => {
                 // If the refresh completed without items, clear stale cached entries.
                 if self.channel_list_refresh_pending.remove(&network) {
-                    self.channel_list_cache.insert(network, Vec::new());
+                    self.channel_list_cache.insert(network.clone(), Vec::new());
+                    self.channel_list_index.retain(|(net, _), _| net != &network);
                 } else {
                     self.channel_list_cache.entry(network).or_default();
                 }
@@ -695,7 +716,7 @@ impl AppState {
                 id: buffer.id.clone(),
                 topic: buffer.topic.clone(),
                 nicklist: buffer.nicklist.clone(),
-                lines: buffer.messages.iter().cloned().collect(),
+                lines: Arc::from(buffer.messages.iter().cloned().collect::<Vec<_>>()),
             });
 
         AppViewModel {
@@ -738,7 +759,7 @@ pub struct ActiveBufferView {
     pub id: BufferId,
     pub topic: Option<String>,
     pub nicklist: Vec<String>,
-    pub lines: Vec<Message>,
+    pub lines: Arc<Vec<Message>>,
 }
 
 #[cfg(test)]

@@ -358,7 +358,7 @@ impl UiEngine {
             self.buffer_refs = Vec::with_capacity(buffer_count);
             for buffer in &vm.buffers {
                 self.buffer_refs
-                    .push((buffer.id.network.clone(), buffer.id.name.clone()));
+                    .push((buffer.id.network().to_owned(), buffer.id.name().to_owned()));
             }
         }
 
@@ -422,7 +422,7 @@ impl UiEngine {
 
         // Sync selection with active buffer
         if let Some(ref buffer) = vm.active_buffer {
-            let target = (buffer.id.network.clone(), buffer.id.name.clone());
+            let target = (buffer.id.network().to_owned(), buffer.id.name().to_owned());
             if let Some(idx) = self
                 .sidebar
                 .items
@@ -509,12 +509,12 @@ impl UiEngine {
         let chat_title = vm
             .active_buffer
             .as_ref()
-            .map(|buffer| format!("{} / {}", buffer.id.network, buffer.id.name))
+            .map(|buffer| format!("{} / {}", buffer.id.network(), buffer.id.name()))
             .unwrap_or_else(|| "No active buffer".to_owned());
         self.active_profile = vm
             .active_buffer
             .as_ref()
-            .map(|buffer| buffer.id.network.clone());
+            .map(|buffer| buffer.id.network().to_owned());
 
         let chat_lines = vm
             .active_buffer
@@ -544,7 +544,7 @@ impl UiEngine {
         let active_buffer_key = vm
             .active_buffer
             .as_ref()
-            .map(|buffer| format!("{}/{}", buffer.id.network, buffer.id.name));
+            .map(|buffer| format!("{}/{}", buffer.id.network(), buffer.id.name()));
         if self.last_active_buffer != active_buffer_key {
             self.last_active_buffer = active_buffer_key;
             self.chat_follow_tail = true;
@@ -1335,7 +1335,7 @@ impl UiEngine {
     }
 
     fn submit_join_line(&mut self, profile: String, channel: String) -> Vec<UiIntent> {
-        let normalized = if channel.starts_with('#') {
+        let normalized = if tirc_core::is_channel_name(&channel) {
             channel
         } else {
             format!("#{channel}")
@@ -1413,7 +1413,7 @@ impl UiEngine {
     }
 
     fn history_next(&mut self) -> bool {
-        if let Some(entry) = self.input_history.next() {
+        if let Some(entry) = self.input_history.newer() {
             self.input.set_text(entry.to_owned());
             true
         } else {
@@ -1489,10 +1489,10 @@ impl UiEngine {
                 };
                 self.sidebar_selected = self.sidebar.buffer_indices[next_pos];
 
-                if let Some(item) = self.sidebar.items.get(self.sidebar_selected) {
-                    if let Some((network, name)) = item.buffer_id() {
-                        return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
-                    }
+                if let Some(item) = self.sidebar.items.get(self.sidebar_selected)
+                    && let Some((network, name)) = item.buffer_id()
+                {
+                    return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
                 }
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
@@ -1577,13 +1577,13 @@ impl UiEngine {
             let mut chats: Vec<String> = Vec::new();
 
             for buf in &vm.buffers {
-                if buf.id.network.as_str() != &*profile || buf.id.name == "status" {
+                if buf.id.network() != &*profile || buf.id.name() == "status" {
                     continue;
                 }
-                if buf.id.name.starts_with('#') || buf.id.name.starts_with('&') {
-                    channels.push(buf.id.name.clone());
+                if tirc_core::is_channel_name(buf.id.name()) {
+                    channels.push(buf.id.name().to_owned());
                 } else {
-                    chats.push(buf.id.name.clone());
+                    chats.push(buf.id.name().to_owned());
                 }
             }
 

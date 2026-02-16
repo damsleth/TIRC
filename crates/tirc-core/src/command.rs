@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     event::{AppEvent, CommandEvent, CommandSource, UiAction, UiEvent},
-    model::AppState,
+    model::{AppState, is_channel_name},
 };
 
 /// Command specification shared by slash and palette entry points.
@@ -152,7 +152,7 @@ impl CommandRegistry {
             .flat_map(|spec| {
                 spec.aliases
                     .iter()
-                    .map(move |alias| (alias.to_string(), spec.id.to_string()))
+                    .map(move |alias| ((*alias).to_owned(), spec.id.to_owned()))
             })
             .collect();
 
@@ -486,22 +486,22 @@ fn infer_single_profile(state: &AppState) -> Option<String> {
 
 fn infer_profile_from_focus_or_single(state: &AppState) -> Option<String> {
     if let Some(focus) = state.focus.as_ref()
-        && focus.network != "local"
+        && focus.network() != "local"
     {
-        return Some(focus.network.clone());
+        return Some(focus.network().to_owned());
     }
     infer_single_profile(state)
 }
 
 fn infer_target_from_focus(state: &AppState) -> Option<String> {
     state.focus.as_ref().and_then(|focus| {
-        if focus.network == "local" {
+        if focus.network() == "local" {
             return None;
         }
-        if focus.name == "status" {
+        if focus.name() == "status" {
             return None;
         }
-        Some(focus.name.clone())
+        Some(focus.name().to_owned())
     })
 }
 
@@ -521,59 +521,46 @@ fn resolve_join_args(state: &AppState, args: &[&str]) -> Option<(String, String)
     }
 }
 
+/// Resolve part command arguments with an unambiguous grammar:
+///
+/// - `/part`                          → part focused channel on focused profile
+/// - `/part #channel`                 → part #channel on focused profile
+/// - `/part #channel reason...`       → part #channel with reason on focused profile
+/// - `/part profile #channel`         → part #channel on profile
+/// - `/part profile #channel reason...` → part #channel with reason on profile
+/// - `/part reason...`                → part focused channel with reason (if first word is not a channel)
 fn resolve_part_args(state: &AppState, args: &[&str]) -> Option<(String, String, Option<String>)> {
     match args {
         [] => {
+            // /part — part focused channel
             let profile = infer_profile_from_focus_or_single(state)?;
             let target = infer_target_from_focus(state)?;
             Some((profile, target, None))
         }
-        [only] => {
-            if only.starts_with('#') {
-                let profile = infer_profile_from_focus_or_single(state)?;
-                Some((profile, (*only).to_owned(), None))
-            } else if state.networks.contains_key(*only) {
-                let target = infer_target_from_focus(state)?;
-                Some(((*only).to_owned(), target, None))
+        [first, rest @ ..] if is_channel_name(first) => {
+            // /part #channel [reason...]
+            let profile = infer_profile_from_focus_or_single(state)?;
+            let reason = if rest.is_empty() {
+                None
             } else {
-                let profile = infer_profile_from_focus_or_single(state)?;
-                let target = infer_target_from_focus(state)?;
-                Some((profile, target, Some((*only).to_owned())))
-            }
+                Some(rest.join(" "))
+            };
+            Some((profile, (*first).to_owned(), reason))
         }
-        [first, second] => {
-            if state.networks.contains_key(*first) {
-                if second.starts_with('#') || !second.contains(' ') {
-                    Some(((*first).to_owned(), (*second).to_owned(), None))
-                } else {
-                    let target = infer_target_from_focus(state)?;
-                    Some(((*first).to_owned(), target, Some((*second).to_owned())))
-                }
+        [profile, second, rest @ ..] if state.networks.contains_key(*profile) && is_channel_name(second) => {
+            // /part profile #channel [reason...]
+            let reason = if rest.is_empty() {
+                None
             } else {
-                let profile = infer_profile_from_focus_or_single(state)?;
-                if first.starts_with('#') {
-                    Some((profile, (*first).to_owned(), Some((*second).to_owned())))
-                } else {
-                    let target = infer_target_from_focus(state)?;
-                    Some((profile, target, Some(format!("{first} {second}"))))
-                }
-            }
+                Some(rest.join(" "))
+            };
+            Some(((*profile).to_owned(), (*second).to_owned(), reason))
         }
         _ => {
-            let first = args[0];
-            let second = args[1];
-            let rest = args[2..].join(" ");
-            if state.networks.contains_key(first) {
-                Some((first.to_owned(), second.to_owned(), Some(rest)))
-            } else {
-                let profile = infer_profile_from_focus_or_single(state)?;
-                if first.starts_with('#') {
-                    Some((profile, first.to_owned(), Some(args[1..].join(" "))))
-                } else {
-                    let target = infer_target_from_focus(state)?;
-                    Some((profile, target, Some(args.join(" "))))
-                }
-            }
+            // /part reason... — treat entire arg string as reason for focused channel
+            let profile = infer_profile_from_focus_or_single(state)?;
+            let target = infer_target_from_focus(state)?;
+            Some((profile, target, Some(args.join(" "))))
         }
     }
 }
@@ -946,5 +933,75 @@ mod tests {
             }
             other => panic!("unexpected outbound: {other:?}"),
         }
+    }
+
+    // Helper to create a state with a single network and focused channel
+    fn state_with_focus(profile: &str, channel: &str) -> AppState {
+        let mut state = AppState::new(100, 1000);
+        state.ensure_buffer(profile, channel);
+        state.focus = Some(BufferId::new(profile, channel));
+        state.networks.insert(
+            profile.to_owned(),
+            crate::model::NetworkState::new(profile, "irc.example.com:6667"),
+        );
+        state
+    }
+
+    #[test]
+    fn part_no_args_uses_focus() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &[]);
+        assert_eq!(result, Some(("net".into(), "#rust".into(), None)));
+    }
+
+    #[test]
+    fn part_channel_only() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["#other"]);
+        assert_eq!(result, Some(("net".into(), "#other".into(), None)));
+    }
+
+    #[test]
+    fn part_channel_with_reason() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["#rust", "goodbye", "friends"]);
+        assert_eq!(
+            result,
+            Some(("net".into(), "#rust".into(), Some("goodbye friends".into())))
+        );
+    }
+
+    #[test]
+    fn part_reason_without_channel() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["see", "you", "later"]);
+        assert_eq!(
+            result,
+            Some(("net".into(), "#rust".into(), Some("see you later".into())))
+        );
+    }
+
+    #[test]
+    fn part_explicit_profile_and_channel() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["net", "#other"]);
+        assert_eq!(result, Some(("net".into(), "#other".into(), None)));
+    }
+
+    #[test]
+    fn part_explicit_profile_channel_reason() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["net", "#other", "bye"]);
+        assert_eq!(
+            result,
+            Some(("net".into(), "#other".into(), Some("bye".into())))
+        );
+    }
+
+    #[test]
+    fn part_ampersand_channel() {
+        let state = state_with_focus("net", "#rust");
+        let result = resolve_part_args(&state, &["&local"]);
+        assert_eq!(result, Some(("net".into(), "&local".into(), None)));
     }
 }

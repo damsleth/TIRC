@@ -6,6 +6,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::{
     error::ConfigError,
@@ -155,9 +156,36 @@ pub enum SaslMechanism {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretRef {
-    pub password: Option<String>,
-    pub sasl_password: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_zeroizing_option",
+        deserialize_with = "deserialize_zeroizing_option"
+    )]
+    pub password: Option<Zeroizing<String>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_zeroizing_option",
+        deserialize_with = "deserialize_zeroizing_option"
+    )]
+    pub sasl_password: Option<Zeroizing<String>>,
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn serialize_zeroizing_option<S: serde::Serializer>(
+    value: &Option<Zeroizing<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(z) => serializer.serialize_some(z.as_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_zeroizing_option<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Zeroizing<String>>, D::Error> {
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.map(Zeroizing::new))
 }
 
 #[derive(Debug, Clone)]

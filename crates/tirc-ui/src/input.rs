@@ -1,7 +1,16 @@
 /// Line editor with Emacs-like primitives.
+///
+/// # Cursor representation
+///
+/// `cursor` is a **char offset** (not a byte offset). This means every mutation
+/// that touches `text` must iterate the char iterator to translate positions,
+/// making individual edits O(n) in the length of the string. For typical IRC
+/// input (< 512 chars) this is fine; if the editor were ever used for large
+/// documents, it should be replaced with a rope or gap-buffer structure.
 #[derive(Debug, Clone, Default)]
 pub struct InputEditor {
     text: String,
+    /// Cursor position as a char (Unicode scalar) offset from the start of `text`.
     cursor: usize,
 }
 
@@ -179,11 +188,9 @@ impl InputHistory {
         self.index.and_then(|idx| self.entries.get(idx)).map(String::as_str)
     }
 
-    /// Navigate to next (newer) entry. Returns the text to display, if any.
-    pub fn next(&mut self) -> Option<&str> {
-        let Some(idx) = self.index else {
-            return None;
-        };
+    /// Navigate to newer (more recent) entry. Returns the text to display, if any.
+    pub fn newer(&mut self) -> Option<&str> {
+        let idx = self.index?;
 
         if idx + 1 < self.entries.len() {
             self.index = Some(idx + 1);
@@ -237,11 +244,11 @@ mod tests {
         assert_eq!(hist.prev("draft"), Some("first"));
 
         // Go forward
-        assert_eq!(hist.next(), Some("second"));
+        assert_eq!(hist.newer(), Some("second"));
         // Back to draft
-        assert_eq!(hist.next(), Some("draft"));
+        assert_eq!(hist.newer(), Some("draft"));
         // No more
-        assert_eq!(hist.next(), None);
+        assert_eq!(hist.newer(), None);
     }
 
     #[test]

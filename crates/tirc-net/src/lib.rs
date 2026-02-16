@@ -1,8 +1,8 @@
 //! Async IRC networking runtime for TIRC.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
-    time::Duration,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -30,6 +30,59 @@ const CTCP_DELIM: char = '\x01';
 
 /// Version string for CTCP VERSION replies.
 const TIRC_VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+
+/// Maximum IRC message length (512 bytes including CRLF per RFC 2812 §2.3).
+const MAX_IRC_MESSAGE_LEN: usize = 512;
+
+/// Maximum inbound line length to prevent unbounded memory allocation.
+const MAX_INBOUND_LINE_LEN: usize = 8192;
+
+/// Send a network event, returning Err(()) if the receiver is gone (channel closed).
+async fn send_event(
+    tx: &mpsc::Sender<NetworkEvent>,
+    event: NetworkEvent,
+) -> Result<(), ()> {
+    tx.send(event).await.map_err(|_| {
+        debug!("event channel closed, receiver dropped");
+    })
+}
+
+/// Simple token-bucket rate limiter for outbound IRC messages.
+struct RateLimiter {
+    tokens: f64,
+    max_tokens: f64,
+    refill_rate: f64, // tokens per second
+    last_refill: Instant,
+}
+
+impl RateLimiter {
+    fn new(max_burst: f64, per_second: f64) -> Self {
+        Self {
+            tokens: max_burst,
+            max_tokens: max_burst,
+            refill_rate: per_second,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Wait until a token is available, then consume one.
+    async fn acquire(&mut self) {
+        self.refill();
+        while self.tokens < 1.0 {
+            let wait = Duration::from_secs_f64((1.0 - self.tokens) / self.refill_rate);
+            time::sleep(wait).await;
+            self.refill();
+        }
+        self.tokens -= 1.0;
+    }
+
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        self.last_refill = now;
+    }
+}
 
 /// Outbound command sent from app state/commands to a network worker.
 #[derive(Debug, Clone)]
@@ -146,6 +199,8 @@ struct ConnectionRuntime {
     registration_complete: bool,
     sasl_in_progress: bool,
     sasl_done: bool,
+    /// Per-channel membership tracking: channel -> set of nicks.
+    channel_members: HashMap<String, HashSet<String>>,
 }
 
 impl ConnectionRuntime {
@@ -159,6 +214,7 @@ impl ConnectionRuntime {
             registration_complete: false,
             sasl_in_progress: false,
             sasl_done: profile.sasl.is_none(),
+            channel_members: HashMap::new(),
         }
     }
 }
@@ -176,13 +232,15 @@ async fn run_connection_task(
         match connect_stream(&profile).await {
             Ok(stream) => {
                 attempt = 0;
-                if events_tx
-                    .send(NetworkEvent::Connected {
+                if send_event(
+                    &events_tx,
+                    NetworkEvent::Connected {
                         network: profile.name.clone(),
                         server: format!("{}:{}", profile.host, profile.port),
-                    })
-                    .await
-                    .is_err()
+                    },
+                )
+                .await
+                .is_err()
                 {
                     return;
                 }
@@ -200,30 +258,48 @@ async fn run_connection_task(
                         should_exit = true;
                     }
                     Ok(ConnectionExit::Unexpected(reason)) => {
-                        let _ = events_tx
-                            .send(NetworkEvent::Disconnected {
+                        if send_event(
+                            &events_tx,
+                            NetworkEvent::Disconnected {
                                 network: profile.name.clone(),
                                 reason,
-                            })
-                            .await;
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
                     }
                     Err(err) => {
-                        let _ = events_tx
-                            .send(NetworkEvent::Disconnected {
+                        if send_event(
+                            &events_tx,
+                            NetworkEvent::Disconnected {
                                 network: profile.name.clone(),
                                 reason: err.to_string(),
-                            })
-                            .await;
+                            },
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }
             Err(err) => {
-                let _ = events_tx
-                    .send(NetworkEvent::Disconnected {
+                if send_event(
+                    &events_tx,
+                    NetworkEvent::Disconnected {
                         network: profile.name.clone(),
                         reason: format!("connection failed: {err}"),
-                    })
-                    .await;
+                    },
+                )
+                .await
+                .is_err()
+                {
+                    return;
+                }
             }
         }
 
@@ -283,6 +359,7 @@ async fn run_live_connection(
     let mut line_buf = Vec::with_capacity(1024);
 
     let mut runtime = ConnectionRuntime::new(profile);
+    let mut rate_limiter = RateLimiter::new(5.0, 2.0);
     send_registration(&mut writer_half, profile).await?;
 
     loop {
@@ -299,6 +376,8 @@ async fn run_live_connection(
                     &mut writer_half,
                     joined_channels,
                     events_tx,
+                    &mut runtime,
+                    &mut rate_limiter,
                 ).await? {
                     return Ok(ConnectionExit::Requested);
                 }
@@ -307,6 +386,17 @@ async fn run_live_connection(
                 let count = read?;
                 if count == 0 {
                     return Ok(ConnectionExit::Unexpected("connection closed by server".to_owned()));
+                }
+
+                // Cap inbound line length to prevent unbounded memory allocation
+                if line_buf.len() > MAX_INBOUND_LINE_LEN {
+                    warn!(
+                        network = profile.name,
+                        len = line_buf.len(),
+                        "inbound line exceeds {} bytes, truncating",
+                        MAX_INBOUND_LINE_LEN
+                    );
+                    line_buf.truncate(MAX_INBOUND_LINE_LEN);
                 }
 
                 let line = decode_server_line(&line_buf);
@@ -363,43 +453,42 @@ async fn send_registration<W: AsyncWrite + Unpin>(
 
 async fn handle_command<W: AsyncWrite + Unpin>(
     command: NetCommand,
-    network: &str,
+    _network: &str,
     writer: &mut W,
     joined_channels: &mut BTreeSet<String>,
-    events_tx: &mpsc::Sender<NetworkEvent>,
+    _events_tx: &mpsc::Sender<NetworkEvent>,
+    runtime: &mut ConnectionRuntime,
+    rate_limiter: &mut RateLimiter,
 ) -> Result<bool, NetError> {
     match command {
         NetCommand::Raw(line) => {
+            rate_limiter.acquire().await;
             write_raw_line(writer, &line).await?;
         }
         NetCommand::Join(channel) => {
             joined_channels.insert(channel.clone());
+            rate_limiter.acquire().await;
             write_command(writer, Command::JOIN(channel.clone(), None, None)).await?;
-            let _ = events_tx
-                .send(NetworkEvent::Joined {
-                    network: network.to_owned(),
-                    channel,
-                })
-                .await;
+            // Don't emit Joined here — let the server echo (Command::JOIN handler) be
+            // the single source of truth to avoid duplicate events.
         }
         NetCommand::Part { channel, reason } => {
             joined_channels.remove(&channel);
+            runtime.channel_members.remove(&channel);
+            rate_limiter.acquire().await;
             write_command(writer, Command::PART(channel.clone(), reason.clone())).await?;
-            let _ = events_tx
-                .send(NetworkEvent::Parted {
-                    network: network.to_owned(),
-                    channel,
-                    reason,
-                })
-                .await;
+            // Don't emit Parted here — let the server echo be the single source of truth.
         }
         NetCommand::List => {
+            rate_limiter.acquire().await;
             write_command(writer, Command::LIST(None, None)).await?;
         }
         NetCommand::Privmsg { target, body } => {
+            rate_limiter.acquire().await;
             write_command(writer, Command::PRIVMSG(target, body)).await?;
         }
         NetCommand::Nick(nick) => {
+            rate_limiter.acquire().await;
             write_command(writer, Command::NICK(nick)).await?;
         }
         NetCommand::Disconnect => {
@@ -476,7 +565,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                         }
                         "SOURCE" => {
                             let reply = format!(
-                                "{CTCP_DELIM}SOURCE https://github.com/user/tirc{CTCP_DELIM}"
+                                "{CTCP_DELIM}SOURCE https://github.com/damsleth/TIRC{CTCP_DELIM}"
                             );
                             write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
                         }
@@ -485,7 +574,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                             let action_body = ctcp_arg.unwrap_or("");
                             // Strip STATUSMSG prefixes before checking if private
                             let stripped_target =
-                                target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
+                                target.trim_start_matches(['@', '+', '%']);
                             let is_private = !stripped_target.is_channel_name();
                             let buffer = if is_private {
                                 sender.clone().unwrap_or_else(|| target.clone())
@@ -496,8 +585,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                                 .to_ascii_lowercase()
                                 .contains(&runtime.current_nick.to_ascii_lowercase());
 
-                            let _ = events_tx
-                                .send(NetworkEvent::Action {
+                            send_event(events_tx, NetworkEvent::Action {
                                     network: profile.name.clone(),
                                     buffer,
                                     sender,
@@ -505,8 +593,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                                     is_private,
                                     is_mention,
                                     ts,
-                                })
-                                .await;
+                                }).await.map_err(|()| NetError::ChannelClosed)?;
                         }
                         _ => {
                             // Unknown CTCP, ignore
@@ -519,7 +606,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
 
             // Strip STATUSMSG prefixes (@, +, %) first before checking if it's a channel
             // These indicate voice/halfop/op-only messages but should go to the channel buffer
-            let stripped_target = target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
+            let stripped_target = target.trim_start_matches(['@', '+', '%']);
             let is_private = !stripped_target.is_channel_name();
 
             let buffer = if is_private {
@@ -531,8 +618,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 .to_ascii_lowercase()
                 .contains(&runtime.current_nick.to_ascii_lowercase());
 
-            let _ = events_tx
-                .send(NetworkEvent::Message {
+            send_event(events_tx, NetworkEvent::Message {
                     network: profile.name.clone(),
                     buffer,
                     sender,
@@ -541,13 +627,11 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                     is_private,
                     is_mention,
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::NOTICE(target, body) => {
             let sender = source_nick.clone();
-            let _ = events_tx
-                .send(NetworkEvent::Message {
+            send_event(events_tx, NetworkEvent::Message {
                     network: profile.name.clone(),
                     buffer: if target.is_channel_name() {
                         target
@@ -560,114 +644,134 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                     is_private: false,
                     is_mention: false,
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::JOIN(channel, _, _) => {
+            if let Some(ref nick) = source_nick {
+                // Track channel membership
+                runtime.channel_members
+                    .entry(channel.clone())
+                    .or_default()
+                    .insert(nick.clone());
+            }
             if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
                 joined_channels.insert(channel.clone());
-                let _ = events_tx
-                    .send(NetworkEvent::Joined {
+                send_event(events_tx, NetworkEvent::Joined {
                         network: profile.name.clone(),
                         channel,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
             }
         }
         Command::PART(channel, reason) => {
+            if let Some(ref nick) = source_nick
+                && let Some(members) = runtime.channel_members.get_mut(&channel)
+            {
+                members.remove(nick);
+            }
             if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
                 joined_channels.remove(&channel);
+                runtime.channel_members.remove(&channel);
             }
-            let _ = events_tx
-                .send(NetworkEvent::Parted {
+            send_event(events_tx, NetworkEvent::Parted {
                     network: profile.name.clone(),
                     channel,
                     reason,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::NICK(new_nick) => {
             if source_nick.as_deref() == Some(runtime.current_nick.as_str()) {
                 runtime.current_nick = new_nick.clone();
             }
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            // Update nick in channel membership tracking
+            if let Some(ref old_nick) = source_nick {
+                for members in runtime.channel_members.values_mut() {
+                    if members.remove(old_nick) {
+                        members.insert(new_nick.clone());
+                    }
+                }
+            }
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: format!("Nick changed to {new_nick}"),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::QUIT(reason) => {
             if let Some(nick) = source_nick {
-                // Find all channels this user was in
-                // Note: We don't track other users' channel membership, so we send to all joined channels
-                // The UI can filter based on nick list tracking
-                let channels: Vec<String> = joined_channels.iter().cloned().collect();
-                let _ = events_tx
-                    .send(NetworkEvent::UserQuit {
+                // Only include channels where the user was actually a member
+                let channels: Vec<String> = runtime.channel_members
+                    .iter()
+                    .filter(|(_, members)| members.contains(&nick))
+                    .map(|(channel, _)| channel.clone())
+                    .collect();
+                // Remove the user from all channel memberships
+                for members in runtime.channel_members.values_mut() {
+                    members.remove(&nick);
+                }
+                send_event(events_tx, NetworkEvent::UserQuit {
                         network: profile.name.clone(),
                         nick,
                         reason,
                         channels,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
             }
         }
         Command::KICK(channel, kicked_nick, reason) => {
             let was_self = kicked_nick == runtime.current_nick;
-            // If we were kicked, remove from joined channels
+            // Remove kicked user from channel membership tracking
+            if let Some(members) = runtime.channel_members.get_mut(&channel) {
+                members.remove(&kicked_nick);
+            }
             if was_self {
                 joined_channels.remove(&channel);
+                runtime.channel_members.remove(&channel);
             }
-            let _ = events_tx
-                .send(NetworkEvent::Kicked {
+            send_event(events_tx, NetworkEvent::Kicked {
                     network: profile.name.clone(),
                     channel,
                     kicked_nick,
                     by_nick: source_nick,
                     reason,
                     was_self,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::ChannelMODE(channel, modes) => {
             // Convert Mode objects to strings
-            let mode_str: String = modes
+            let mode_str = modes
                 .iter()
-                .map(|m| format!("{}", m))
-                .collect::<Vec<_>>()
-                .join("");
+                .fold(String::new(), |mut acc, m| {
+                    use std::fmt::Write;
+                    let _ = write!(acc, "{m}");
+                    acc
+                });
             // Extract args from mode objects (nicks for +o, +v etc)
             let args: Vec<String> = modes
                 .iter()
                 .filter_map(|m| m.arg().map(ToOwned::to_owned))
                 .collect();
-            let _ = events_tx
-                .send(NetworkEvent::ModeChange {
+            send_event(events_tx, NetworkEvent::ModeChange {
                     network: profile.name.clone(),
                     target: channel,
                     modes: mode_str,
                     args,
                     set_by: source_nick.clone(),
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::UserMODE(user, modes) => {
-            let mode_str: String = modes
+            let mode_str = modes
                 .iter()
-                .map(|m| format!("{}", m))
-                .collect::<Vec<_>>()
-                .join("");
-            let _ = events_tx
-                .send(NetworkEvent::ModeChange {
+                .fold(String::new(), |mut acc, m| {
+                    use std::fmt::Write;
+                    let _ = write!(acc, "{m}");
+                    acc
+                });
+            send_event(events_tx, NetworkEvent::ModeChange {
                     network: profile.name.clone(),
                     target: user,
                     modes: mode_str,
                     args: vec![],
                     set_by: source_nick.clone(),
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Command::CAP(_, subcommand, _, params) => {
             handle_cap_message(subcommand, params, profile, runtime, writer, events_tx).await?;
@@ -700,13 +804,11 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
             .await?;
         }
         Command::Raw(cmd, args) => {
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: format!("{cmd} {}", args.join(" ")),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         _ => {}
     }
@@ -772,13 +874,11 @@ async fn handle_cap_message<W: AsyncWrite + Unpin>(
             }
         }
         CapSubCommand::NAK => {
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: "server rejected requested capabilities".to_owned(),
                     ts: Utc::now(),
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
             write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
         }
         CapSubCommand::LIST | CapSubCommand::END | CapSubCommand::DEL | CapSubCommand::REQ => {}
@@ -803,112 +903,99 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             for channel in joined_channels {
                 write_command(writer, Command::JOIN(channel.clone(), None, None)).await?;
             }
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: args.join(" "),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::RPL_TOPIC => {
             if args.len() >= 3 {
-                let _ = events_tx
-                    .send(NetworkEvent::System {
+                send_event(events_tx, NetworkEvent::System {
                         network: profile.name.clone(),
                         body: format!("topic {}: {}", args[1], args[2]),
                         ts,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
             }
         }
         Response::RPL_LISTSTART => {
-            let _ = events_tx
-                .send(NetworkEvent::ChannelListStart {
+            send_event(events_tx, NetworkEvent::ChannelListStart {
                     network: profile.name.clone(),
-                })
-                .await;
-            let _ = events_tx
-                .send(NetworkEvent::System {
+                }).await.map_err(|()| NetError::ChannelClosed)?;
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: "Channel list start".to_owned(),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::RPL_LIST => {
             if args.len() >= 4 {
                 let channel = &args[1];
                 let users = args[2].parse::<u32>().unwrap_or(0);
                 let topic = &args[3];
-                let _ = events_tx
-                    .send(NetworkEvent::ChannelListItem {
+                send_event(events_tx, NetworkEvent::ChannelListItem {
                         network: profile.name.clone(),
                         channel: channel.to_owned(),
                         users,
                         topic: topic.to_owned(),
-                    })
-                    .await;
-                let _ = events_tx
-                    .send(NetworkEvent::System {
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
+                send_event(events_tx, NetworkEvent::System {
                         network: profile.name.clone(),
                         body: format!("{channel} ({users}) {topic}"),
                         ts,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
             }
         }
         Response::RPL_LISTEND => {
-            let _ = events_tx
-                .send(NetworkEvent::ChannelListEnd {
+            send_event(events_tx, NetworkEvent::ChannelListEnd {
                     network: profile.name.clone(),
-                })
-                .await;
-            let _ = events_tx
-                .send(NetworkEvent::System {
+                }).await.map_err(|()| NetError::ChannelClosed)?;
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: "Channel list end".to_owned(),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::RPL_NAMREPLY => {
             if args.len() >= 4 {
                 let channel = args[2].clone();
-                let nicks = args[3]
+                // Preserve mode prefixes (@, +, %, &, ~) so the nicklist
+                // is consistent from the start (fix QA #9).
+                let nicks: Vec<String> = args[3]
                     .split_whitespace()
-                    .map(|nick| nick.trim_start_matches(['@', '+', '%', '&', '~']))
                     .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                let _ = events_tx
-                    .send(NetworkEvent::NickList {
+                    .collect();
+                // Update channel membership tracking (bare nicks)
+                let members = runtime.channel_members
+                    .entry(channel.clone())
+                    .or_default();
+                for nick in &nicks {
+                    let bare = nick.trim_start_matches(['@', '+', '%', '&', '~']);
+                    members.insert(bare.to_owned());
+                }
+                send_event(events_tx, NetworkEvent::NickList {
                         network: profile.name.clone(),
                         channel,
                         nicks,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
             }
         }
         Response::RPL_MOTD | Response::RPL_MOTDSTART => {
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: args.join(" "),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::RPL_SASLSUCCESS => {
             runtime.sasl_in_progress = false;
             runtime.sasl_done = true;
             write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: "SASL authentication successful".to_owned(),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::ERR_SASLFAIL
         | Response::ERR_SASLTOOLONG
@@ -917,13 +1004,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             runtime.sasl_in_progress = false;
             runtime.sasl_done = true;
             write_command(writer, Command::CAP(None, CapSubCommand::END, None, None)).await?;
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: format!("SASL issue: {:?} {}", response, args.join(" ")),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         Response::ERR_NICKNAMEINUSE => {
             const MAX_NICK_COLLISIONS: u8 = 5;
@@ -932,26 +1017,22 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             runtime.nick_collision_count += 1;
 
             if runtime.nick_collision_count > MAX_NICK_COLLISIONS {
-                let _ = events_tx
-                    .send(NetworkEvent::System {
+                send_event(events_tx, NetworkEvent::System {
                         network: profile.name.clone(),
                         body: format!(
                             "Too many nick collisions ({MAX_NICK_COLLISIONS}), disconnecting"
                         ),
                         ts,
-                    })
-                    .await;
+                    }).await.map_err(|()| NetError::ChannelClosed)?;
                 return Err(NetError::TooManyNickCollisions);
             }
 
-            // Use underscore suffix pattern: nick, nick_, nick_1, nick_2, etc.
             let suffix = if runtime.nick_collision_count == 1 {
                 "_".to_owned()
             } else {
                 format!("_{}", runtime.nick_collision_count - 1)
             };
 
-            // Truncate base nick if resulting nick would exceed max length
             let max_base_len = MAX_NICK_LENGTH.saturating_sub(suffix.len());
             let base = if runtime.original_nick.len() > max_base_len {
                 &runtime.original_nick[..max_base_len]
@@ -962,13 +1043,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             let fallback = format!("{base}{suffix}");
             runtime.current_nick = fallback.clone();
 
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: format!("Nick in use, trying {fallback}"),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
 
             write_command(writer, Command::NICK(fallback)).await?;
         }
@@ -978,13 +1057,11 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         | Response::ERR_NOSUCHCHANNEL
         | Response::ERR_CANNOTSENDTOCHAN
         | Response::ERR_NOSUCHNICK => {
-            let _ = events_tx
-                .send(NetworkEvent::System {
+            send_event(events_tx, NetworkEvent::System {
                     network: profile.name.clone(),
                     body: format!("error {:?}: {}", response, args.join(" ")),
                     ts,
-                })
-                .await;
+                }).await.map_err(|()| NetError::ChannelClosed)?;
         }
         _ => {}
     }
@@ -1011,7 +1088,7 @@ async fn send_sasl_payload<W: AsyncWrite + Unpin>(
         return Ok(());
     };
 
-    let payload = format!("{}\0{}\0{}", sasl.account, sasl.account, password);
+    let payload = format!("{}\0{}\0{}", sasl.account, sasl.account, password.as_str());
     let encoded = STANDARD.encode(payload);
     write_command(writer, Command::AUTHENTICATE(encoded)).await
 }
@@ -1061,9 +1138,23 @@ async fn write_command<W: AsyncWrite + Unpin>(
 }
 
 async fn write_raw_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> Result<(), NetError> {
-    let mut payload = line.trim_end_matches(['\r', '\n']).to_owned();
-    payload.push_str("\r\n");
-    writer.write_all(payload.as_bytes()).await?;
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    // Enforce IRC RFC 2812 §2.3: max 512 bytes including CRLF (510 payload + \r\n)
+    let max_payload = MAX_IRC_MESSAGE_LEN - 2; // 510 bytes
+    let payload_bytes = trimmed.as_bytes();
+    let truncated = if payload_bytes.len() > max_payload {
+        // Truncate at valid UTF-8 boundary
+        let mut end = max_payload;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        &trimmed[..end]
+    } else {
+        trimmed
+    };
+    let mut out = truncated.to_owned();
+    out.push_str("\r\n");
+    writer.write_all(out.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -1074,8 +1165,15 @@ enum ConnectionExit {
 }
 
 fn reconnect_delay(attempt: u32) -> Duration {
-    let exp = 2_u64.saturating_pow(attempt.min(10));
+    // Cap at attempt 7 since 2^7 = 128 > 120 anyway
+    let exp = 2_u64.saturating_pow(attempt.min(7));
     let base = Duration::from_secs(exp).min(Duration::from_secs(120));
-    let jitter = rand::rng().random_range(0..1_000_u64);
+    // Proportional jitter: 0..base_ms for effective spread
+    let base_ms = base.as_millis() as u64;
+    let jitter = if base_ms > 0 {
+        rand::rng().random_range(0..base_ms)
+    } else {
+        0
+    };
     base + Duration::from_millis(jitter)
 }

@@ -1,3 +1,8 @@
+use nucleo_matcher::{
+    Matcher, Utf32Str,
+    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
+};
+
 /// Palette matcher state.
 #[derive(Debug, Clone, Default)]
 pub struct PaletteEngine {
@@ -74,11 +79,24 @@ impl PaletteEngine {
             return;
         }
 
-        let mut scored = self
+        let pattern = Pattern::new(
+            &self.query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+        let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
+        let mut buf = Vec::new();
+
+        let mut scored: Vec<(u32, &String)> = self
             .items
             .iter()
-            .filter_map(|item| fuzzy_score(&self.query, item).map(|score| (score, item)))
-            .collect::<Vec<_>>();
+            .filter_map(|item| {
+                let haystack = Utf32Str::new(item, &mut buf);
+                let score = pattern.score(haystack, &mut matcher)?;
+                Some((score, item))
+            })
+            .collect();
 
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         self.results = scored.into_iter().map(|(_, item)| item.clone()).collect();
@@ -89,20 +107,43 @@ impl PaletteEngine {
     }
 }
 
-fn fuzzy_score(query: &str, candidate: &str) -> Option<i32> {
-    let query = query.to_ascii_lowercase();
-    let candidate = candidate.to_ascii_lowercase();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut score = 0_i32;
-    let mut pos = 0_usize;
-
-    for q in query.chars() {
-        let slice = &candidate[pos..];
-        let found = slice.find(q)?;
-        pos += found + 1;
-        score += 10 - found as i32;
+    #[test]
+    fn fuzzy_match_basic() {
+        let engine = PaletteEngine::new(vec![
+            "connect".to_owned(),
+            "config".to_owned(),
+            "quit".to_owned(),
+        ]);
+        assert_eq!(engine.results.len(), 3);
     }
 
-    let compact_bonus = (candidate.len() as i32 - query.len() as i32).max(0);
-    Some(score - compact_bonus)
+    #[test]
+    fn fuzzy_match_filters() {
+        let mut engine = PaletteEngine::new(vec![
+            "connect".to_owned(),
+            "config".to_owned(),
+            "quit".to_owned(),
+        ]);
+        engine.query_push('q');
+        assert_eq!(engine.results, vec!["quit"]);
+    }
+
+    #[test]
+    fn fuzzy_match_partial() {
+        let mut engine = PaletteEngine::new(vec![
+            "connect".to_owned(),
+            "config".to_owned(),
+            "quit".to_owned(),
+        ]);
+        engine.query_push('c');
+        engine.query_push('o');
+        // Both "connect" and "config" should match "co"
+        assert!(engine.results.contains(&"connect".to_owned()));
+        assert!(engine.results.contains(&"config".to_owned()));
+        assert!(!engine.results.contains(&"quit".to_owned()));
+    }
 }

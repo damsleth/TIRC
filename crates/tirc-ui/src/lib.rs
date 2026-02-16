@@ -2,7 +2,6 @@
 
 pub mod engine;
 pub mod input;
-pub mod mouse;
 pub mod palette;
 pub mod render;
 

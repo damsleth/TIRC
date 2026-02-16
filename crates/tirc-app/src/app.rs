@@ -3,10 +3,11 @@ use std::{collections::BTreeMap, env, io, path::Path, process::Command, time::Du
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
+    event::{DisableMouseCapture, EnableMouseCapture, EventStream},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 use tracing::{error, warn};
@@ -24,6 +25,23 @@ use tirc_platform::PlatformNotifier;
 use tirc_ui::{UiEngine, UiIntent};
 
 use crate::cli::Cli;
+
+/// Holds all shared mutable resources needed by the application main loop.
+///
+/// Extracted to reduce the 7-parameter free functions into method calls.
+/// Functions like `handle_ui_intents`, `send_chat_line`, `execute_command_line`,
+/// and `close_focused_buffer` can incrementally be converted to `impl AppRuntime`
+/// methods, shrinking parameter lists to `&mut self`.
+#[allow(dead_code)]
+struct AppRuntime {
+    state: tirc_core::AppState,
+    net_manager: NetManager,
+    runtime_config: tirc_config::AppConfig,
+    command_registry: CommandRegistry,
+    paths: AppPaths,
+    logger: LogWriter,
+    notifier: PlatformNotifier,
+}
 
 pub async fn run(cli: Cli) -> Result<()> {
     let paths = AppPaths::discover()?;
@@ -135,54 +153,77 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 
     // Validate focus points to an existing buffer
-    if let Some(ref buffer_id) = state.focus {
-        if !state.buffers.contains_key(buffer_id) {
-            state.focus = state.buffers.keys().next().cloned();
-        }
+    if let Some(ref buffer_id) = state.focus
+        && !state.buffers.contains_key(buffer_id)
+    {
+        state.focus = state.buffers.keys().next().cloned();
     }
 
     let mut terminal = setup_terminal()?;
     let mut needs_draw = true;
-    let mut last_session_save = std::time::Instant::now();
-    let mut last_log_cleanup = std::time::Instant::now();
+    let mut term_events = EventStream::new();
+    let heartbeat_interval = Duration::from_millis(
+        (1000 / runtime_config.performance.max_idle_redraw_hz.max(1) as u64).max(50),
+    );
+    let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut session_save = tokio::time::interval(Duration::from_secs(5));
+    session_save.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut log_cleanup = tokio::time::interval(Duration::from_secs(60 * 60));
+    log_cleanup.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
-        while let Ok(network_event) = net_event_rx.try_recv() {
-            process_network_event(
-                &network_event,
-                &mut state,
-                &notifier,
-                &logger,
-                runtime_config.logging.enabled,
-                &runtime_config,
-            )
-            .await;
-            needs_draw = true;
-        }
+        tokio::select! {
+            biased;
 
-        if event::poll(Duration::from_millis(20))? {
-            let evt = event::read()?;
-            let intents = ui.handle_terminal_event(evt);
-            if !intents.is_empty() {
-                let side_effects = handle_ui_intents(
-                    intents,
+            // Network events — highest priority
+            Some(network_event) = net_event_rx.recv() => {
+                process_network_event(
+                    &network_event,
                     &mut state,
-                    &mut ui,
-                    &mut net_manager,
-                    &command_registry,
-                    &paths,
-                    &mut runtime_config,
+                    &notifier,
                     &logger,
+                    runtime_config.logging.enabled,
+                    &runtime_config,
                 )
                 .await;
-                if side_effects.open_config_editor {
-                    if let Err(err) = open_config_in_editor(&mut terminal, &paths.config_file) {
-                        state.set_status_for(
-                            format!("failed to open config in editor: {err}"),
-                            Duration::from_millis(2_000),
-                        );
-                    } else {
-                        if let Err(err) =
+                needs_draw = true;
+                // Drain any additional pending events without waiting
+                while let Ok(network_event) = net_event_rx.try_recv() {
+                    process_network_event(
+                        &network_event,
+                        &mut state,
+                        &notifier,
+                        &logger,
+                        runtime_config.logging.enabled,
+                        &runtime_config,
+                    )
+                    .await;
+                }
+            }
+
+            // Terminal input events
+            Some(Ok(evt)) = term_events.next() => {
+                let intents = ui.handle_terminal_event(evt);
+                if !intents.is_empty() {
+                    let side_effects = handle_ui_intents(
+                        intents,
+                        &mut state,
+                        &mut ui,
+                        &mut net_manager,
+                        &command_registry,
+                        &paths,
+                        &mut runtime_config,
+                        &logger,
+                    )
+                    .await;
+                    if side_effects.open_config_editor {
+                        if let Err(err) = open_config_in_editor(&mut terminal, &paths.config_file) {
+                            state.set_status_for(
+                                format!("failed to open config in editor: {err}"),
+                                Duration::from_millis(2_000),
+                            );
+                        } else if let Err(err) =
                             reload_runtime_config(&paths, &mut runtime_config, &mut ui)
                         {
                             state.set_status_for(
@@ -196,40 +237,43 @@ pub async fn run(cli: Cli) -> Result<()> {
                             );
                         }
                     }
-                }
-                if side_effects.reload_config {
-                    if let Err(err) = reload_runtime_config(&paths, &mut runtime_config, &mut ui) {
-                        state.set_status_for(
-                            format!("failed to reload config: {err}"),
-                            Duration::from_millis(2_000),
-                        );
-                    } else {
-                        state
-                            .set_status_for("Configuration reloaded", Duration::from_millis(2_000));
+                    if side_effects.reload_config {
+                        if let Err(err) = reload_runtime_config(&paths, &mut runtime_config, &mut ui) {
+                            state.set_status_for(
+                                format!("failed to reload config: {err}"),
+                                Duration::from_millis(2_000),
+                            );
+                        } else {
+                            state
+                                .set_status_for("Configuration reloaded", Duration::from_millis(2_000));
+                        }
                     }
+                    needs_draw = true;
                 }
-                needs_draw = true;
             }
-        }
 
-        if ui.should_draw_heartbeat() {
-            state.apply(AppEvent::Timer(TimerEvent::Heartbeat));
-            needs_draw = true;
-        }
-
-        if last_session_save.elapsed() >= Duration::from_secs(5) {
-            let session = build_session_snapshot(&state);
-            if let Err(err) = save_session(&paths.session_file, &session).await {
-                warn!("failed to save session: {err}");
+            // UI heartbeat (status expiry, clock tick, etc.)
+            _ = heartbeat.tick() => {
+                if ui.should_draw_heartbeat() {
+                    state.apply(AppEvent::Timer(TimerEvent::Heartbeat));
+                    needs_draw = true;
+                }
             }
-            last_session_save = std::time::Instant::now();
-        }
 
-        if last_log_cleanup.elapsed() >= Duration::from_secs(60 * 60) {
-            if let Err(err) = logger.cleanup_retention(Utc::now()).await {
-                warn!("failed to clean old logs: {err}");
+            // Periodic session save
+            _ = session_save.tick() => {
+                let session = build_session_snapshot(&state);
+                if let Err(err) = save_session(&paths.session_file, &session).await {
+                    warn!("failed to save session: {err}");
+                }
             }
-            last_log_cleanup = std::time::Instant::now();
+
+            // Periodic log cleanup
+            _ = log_cleanup.tick() => {
+                if let Err(err) = logger.cleanup_retention(Utc::now()).await {
+                    warn!("failed to clean old logs: {err}");
+                }
+            }
         }
 
         if needs_draw {
@@ -487,7 +531,7 @@ async fn send_chat_line(
         return;
     };
 
-    if focus.network == "local" {
+    if focus.network() == "local" {
         state.set_status_for(
             "Cannot send without an active profile buffer".to_owned(),
             Duration::from_millis(2_000),
@@ -496,22 +540,22 @@ async fn send_chat_line(
     }
 
     let command = NetCommand::Privmsg {
-        target: focus.name.clone(),
+        target: focus.name().to_owned(),
         body: line.clone(),
     };
 
-    if let Err(err) = net_manager.send_command(&focus.network, command).await {
+    if let Err(err) = net_manager.send_command(focus.network(), command).await {
         state.set_status_for(format!("send failed: {err}"), Duration::from_millis(2_000));
         return;
     }
 
     let message_event = NetworkEvent::Message {
-        network: focus.network.clone(),
-        buffer: focus.name.clone(),
+        network: focus.network().to_owned(),
+        buffer: focus.name().to_owned(),
         sender: None,
         body: line.clone(),
         tags: BTreeMap::new(),
-        is_private: !focus.name.starts_with('#'),
+        is_private: !tirc_core::is_channel_name(focus.name()),
         is_mention: false,
         ts: Utc::now(),
     };
@@ -750,7 +794,7 @@ fn build_palette_items(
         state
             .buffers
             .keys()
-            .map(|buffer| format!("buffer {} {}", buffer.network, buffer.name)),
+            .map(|buffer| format!("buffer {} {}", buffer.network(), buffer.name())),
     );
 
     items.extend(
@@ -819,20 +863,19 @@ async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut
         return;
     };
     let mut part_warning: Option<String> = None;
-    if focus.name.starts_with('#')
+    if tirc_core::is_channel_name(focus.name())
         && let Err(err) = net_manager
             .send_command(
-                &focus.network,
+                focus.network(),
                 NetCommand::Part {
-                    channel: focus.name.clone(),
+                    channel: focus.name().to_owned(),
                     reason: Some("closing buffer".to_owned()),
                 },
             )
             .await
+        && !matches!(err, NetError::UnknownNetwork(_))
     {
-        if !matches!(err, NetError::UnknownNetwork(_)) {
-            part_warning = Some(err.to_string());
-        }
+        part_warning = Some(err.to_string());
     }
 
     let removed = state.buffers.remove(&focus).is_some();
@@ -841,8 +884,8 @@ async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut
         return;
     }
 
-    if let Some(network) = state.networks.get_mut(&focus.network) {
-        network.channels.remove(&focus.name);
+    if let Some(network) = state.networks.get_mut(focus.network()) {
+        network.channels.remove(focus.name());
     }
 
     state.focus = state.buffers.keys().next().cloned();
@@ -851,12 +894,12 @@ async fn close_focused_buffer(state: &mut tirc_core::AppState, net_manager: &mut
         Some(err) => state.set_status_for(
             format!(
                 "Closed buffer {}/{} (part failed: {err})",
-                focus.network, focus.name
+                focus.network(), focus.name()
             ),
             Duration::from_millis(2_000),
         ),
         None => state.set_status_for(
-            format!("Closed buffer {}/{}", focus.network, focus.name),
+            format!("Closed buffer {}/{}", focus.network(), focus.name()),
             Duration::from_millis(2_000),
         ),
     }
@@ -920,7 +963,7 @@ async fn restore_session(path: &Path, state: &mut tirc_core::AppState) -> Result
     let session = load_session(path).await?;
 
     for buffer in session.open_buffers {
-        state.ensure_buffer(&buffer.network, &buffer.name);
+        state.ensure_buffer(buffer.network(), buffer.name());
     }
 
     state.focus = session.focused_buffer;

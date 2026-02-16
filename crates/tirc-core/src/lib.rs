@@ -11,7 +11,7 @@ pub use event::{AppEvent, CommandEvent, CommandSource, NetworkEvent, TimerEvent,
 pub use log::{LogRecord, LogWriter};
 pub use model::{
     ActiveBufferView, AppState, AppViewModel, BufferId, BufferState, BufferView, ChannelListEntry,
-    Message, NetworkState, PaletteState,
+    Message, NetworkState, PaletteState, is_channel_name,
 };
 pub use session::{
     ReconnectState, SessionState, build_session_snapshot, load_session, save_session,
