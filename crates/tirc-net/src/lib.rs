@@ -120,11 +120,12 @@ impl NetManager {
             return Err(NetError::UnknownNetwork(network.to_owned()));
         };
 
-        // Send disconnect command; if channel closed, task already terminated
+        // Send disconnect command; if channel closed, task is already shutting down.
         if handle.tx.send(NetCommand::Disconnect).await.is_err() {
             debug!(network, "disconnect command channel already closed");
+        } else if !handle.task.is_finished() {
+            handle.task.abort();
         }
-        handle.task.abort();
         Ok(())
     }
 
@@ -133,11 +134,12 @@ impl NetManager {
         std::mem::swap(&mut self.handles, &mut handles);
 
         for (name, handle) in handles {
-            // Send disconnect command; if channel closed, task already terminated
+            // Send disconnect command; if channel closed, task is already shutting down.
             if handle.tx.send(NetCommand::Disconnect).await.is_err() {
                 debug!(network = %name, "disconnect command channel already closed");
+            } else if !handle.task.is_finished() {
+                handle.task.abort();
             }
-            handle.task.abort();
         }
     }
 }
@@ -166,25 +168,6 @@ impl ConnectionRuntime {
             sasl_in_progress: false,
             sasl_done: profile.sasl.is_none(),
         }
-    }
-}
-
-/// Send a network event with logging on failure.
-/// 
-/// Returns `true` if the send succeeded, `false` if the receiver dropped.
-/// When the receiver drops (app layer shut down), connection tasks should
-/// gracefully terminate.
-/// 
-/// NOTE: This helper exists to replace `let _ = tx.send(...)` patterns with
-/// proper logging. Future refactoring should check the return value and
-/// exit connection tasks when the channel closes.
-#[allow(dead_code)]
-async fn send_event(tx: &mpsc::Sender<NetworkEvent>, event: NetworkEvent) -> bool {
-    if tx.send(event).await.is_err() {
-        debug!("event channel closed, app layer may have shut down");
-        false
-    } else {
-        true
     }
 }
 
@@ -344,7 +327,7 @@ async fn run_live_connection(
                     events_tx,
                     joined_channels,
                 ).await;
-                
+
                 match result {
                     Ok(()) => {}
                     Err(NetError::TooManyNickCollisions) => {
@@ -466,15 +449,15 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
         }
         Command::PRIVMSG(target, body) => {
             let sender = source_nick.clone();
-            
+
             // Check for CTCP request (wrapped in \x01)
             if body.starts_with(CTCP_DELIM) && body.ends_with(CTCP_DELIM) && body.len() > 2 {
-                let ctcp_content = &body[1..body.len()-1];
+                let ctcp_content = &body[1..body.len() - 1];
                 let (ctcp_cmd, ctcp_arg) = ctcp_content
                     .split_once(' ')
                     .map(|(c, a)| (c, Some(a)))
                     .unwrap_or((ctcp_content, None));
-                
+
                 // Handle known CTCP requests
                 if let Some(nick) = &sender {
                     match ctcp_cmd.to_ascii_uppercase().as_str() {
@@ -494,18 +477,23 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                             write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
                         }
                         "CLIENTINFO" => {
-                            let reply = format!("{CTCP_DELIM}CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE{CTCP_DELIM}");
+                            let reply = format!(
+                                "{CTCP_DELIM}CLIENTINFO VERSION PING TIME CLIENTINFO SOURCE{CTCP_DELIM}"
+                            );
                             write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
                         }
                         "SOURCE" => {
-                            let reply = format!("{CTCP_DELIM}SOURCE https://github.com/user/tirc{CTCP_DELIM}");
+                            let reply = format!(
+                                "{CTCP_DELIM}SOURCE https://github.com/user/tirc{CTCP_DELIM}"
+                            );
                             write_command(writer, Command::NOTICE(nick.clone(), reply)).await?;
                         }
                         "ACTION" => {
                             // ACTION is displayed as a message, not auto-replied
                             let action_body = ctcp_arg.unwrap_or("");
                             // Strip STATUSMSG prefixes before checking if private
-                            let stripped_target = target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
+                            let stripped_target =
+                                target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
                             let is_private = !stripped_target.is_channel_name();
                             let buffer = if is_private {
                                 sender.clone().unwrap_or_else(|| target.clone())
@@ -515,7 +503,7 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                             let is_mention = action_body
                                 .to_ascii_lowercase()
                                 .contains(&runtime.current_nick.to_ascii_lowercase());
-                            
+
                             let _ = events_tx
                                 .send(NetworkEvent::Action {
                                     network: profile.name.clone(),
@@ -536,12 +524,12 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 }
                 return Ok(());
             }
-            
+
             // Strip STATUSMSG prefixes (@, +, %) first before checking if it's a channel
             // These indicate voice/halfop/op-only messages but should go to the channel buffer
             let stripped_target = target.trim_start_matches(|c| c == '@' || c == '+' || c == '%');
             let is_private = !stripped_target.is_channel_name();
-            
+
             let buffer = if is_private {
                 sender.clone().unwrap_or_else(|| target.clone())
             } else {
@@ -659,7 +647,10 @@ async fn handle_server_line<W: AsyncWrite + Unpin>(
                 .collect::<Vec<_>>()
                 .join("");
             // Extract args from mode objects (nicks for +o, +v etc)
-            let args: Vec<String> = modes.iter().filter_map(|m| m.arg().map(ToOwned::to_owned)).collect();
+            let args: Vec<String> = modes
+                .iter()
+                .filter_map(|m| m.arg().map(ToOwned::to_owned))
+                .collect();
             let _ = events_tx
                 .send(NetworkEvent::ModeChange {
                     network: profile.name.clone(),
@@ -945,9 +936,9 @@ async fn handle_response<W: AsyncWrite + Unpin>(
         Response::ERR_NICKNAMEINUSE => {
             const MAX_NICK_COLLISIONS: u8 = 5;
             const MAX_NICK_LENGTH: usize = 16;
-            
+
             runtime.nick_collision_count += 1;
-            
+
             if runtime.nick_collision_count > MAX_NICK_COLLISIONS {
                 let _ = events_tx
                     .send(NetworkEvent::System {
@@ -960,14 +951,14 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     .await;
                 return Err(NetError::TooManyNickCollisions);
             }
-            
+
             // Use underscore suffix pattern: nick, nick_, nick_1, nick_2, etc.
             let suffix = if runtime.nick_collision_count == 1 {
                 "_".to_owned()
             } else {
                 format!("_{}", runtime.nick_collision_count - 1)
             };
-            
+
             // Truncate base nick if resulting nick would exceed max length
             let max_base_len = MAX_NICK_LENGTH.saturating_sub(suffix.len());
             let base = if runtime.original_nick.len() > max_base_len {
@@ -975,10 +966,10 @@ async fn handle_response<W: AsyncWrite + Unpin>(
             } else {
                 &runtime.original_nick
             };
-            
+
             let fallback = format!("{base}{suffix}");
             runtime.current_nick = fallback.clone();
-            
+
             let _ = events_tx
                 .send(NetworkEvent::System {
                     network: profile.name.clone(),
@@ -986,7 +977,7 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                     ts,
                 })
                 .await;
-            
+
             write_command(writer, Command::NICK(fallback)).await?;
         }
         Response::ERR_NOTREGISTERED

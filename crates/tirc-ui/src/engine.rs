@@ -3,7 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -62,18 +64,36 @@ enum SidebarSection {
 /// Represents a single item in the unified sidebar tree.
 #[derive(Debug, Clone)]
 enum SidebarItem {
-    /// Profile header - clicking shows status buffer content
-    Profile { name: String },
-    ChannelsHeader { profile: String },
-    Channel { profile: String, name: String },
-    ChatsHeader { profile: String },
-    Chat { profile: String, name: String },
+    /// Profile header
+    Profile {
+        name: String,
+    },
+    /// Status buffer under a profile
+    Status {
+        profile: String,
+    },
+    ChannelsHeader {
+        profile: String,
+    },
+    Channel {
+        profile: String,
+        name: String,
+    },
+    ChatsHeader {
+        profile: String,
+    },
+    Chat {
+        profile: String,
+        name: String,
+    },
 }
 
 impl SidebarItem {
     fn profile_section(&self) -> Option<(String, SidebarSection)> {
         match self {
-            SidebarItem::ChannelsHeader { profile } => Some((profile.clone(), SidebarSection::Channels)),
+            SidebarItem::ChannelsHeader { profile } => {
+                Some((profile.clone(), SidebarSection::Channels))
+            }
             SidebarItem::ChatsHeader { profile } => Some((profile.clone(), SidebarSection::Chats)),
             _ => None,
         }
@@ -81,8 +101,7 @@ impl SidebarItem {
 
     fn buffer_id(&self) -> Option<(String, String)> {
         match self {
-            // Profile header maps to the status buffer
-            SidebarItem::Profile { name } => Some((name.clone(), "status".to_owned())),
+            SidebarItem::Status { profile } => Some((profile.clone(), "status".to_owned())),
             SidebarItem::Channel { profile, name } => Some((profile.clone(), name.clone())),
             SidebarItem::Chat { profile, name } => Some((profile.clone(), name.clone())),
             _ => None,
@@ -111,6 +130,7 @@ pub struct UiEngine {
     focus_pane: FocusPane,
     sidebar_selected: usize,
     sidebar_items: Vec<SidebarItem>,
+    sidebar_buffer_indices: Vec<usize>,
     sidebar_collapse: HashMap<(String, SidebarSection), bool>,
     nick_selected: usize,
     composer: Option<ComposerMode>,
@@ -176,6 +196,7 @@ impl UiEngine {
             focus_pane: FocusPane::Input,
             sidebar_selected: 0,
             sidebar_items: Vec::new(),
+            sidebar_buffer_indices: Vec::new(),
             sidebar_collapse: HashMap::new(),
             nick_selected: 0,
             composer: None,
@@ -270,17 +291,18 @@ impl UiEngine {
     pub fn draw(&mut self, frame: &mut Frame, vm: &AppViewModel) {
         self.last_draw = Instant::now();
         self.help_open = vm.help_open;
-        
+
         // Only rebuild network-related caches when network state changes
         let connected_count = vm.networks.iter().filter(|n| n.connected).count();
         let network_count = vm.networks.len();
         let buffer_count = vm.buffers.len();
         let channel_list_len = vm.channel_list_cache.values().map(|v| v.len()).sum();
-        
-        if network_count != self.last_network_count || connected_count != self.last_connected_count {
+
+        if network_count != self.last_network_count || connected_count != self.last_connected_count
+        {
             self.last_network_count = network_count;
             self.last_connected_count = connected_count;
-            
+
             // Pre-allocate with capacity
             self.connected_profiles = Vec::with_capacity(connected_count);
             for network in vm.networks.iter().filter(|n| n.connected) {
@@ -288,25 +310,26 @@ impl UiEngine {
             }
             self.connected_profiles.sort();
             self.connected_profiles.dedup();
-            
+
             self.server_names = Vec::with_capacity(network_count);
             for network in &vm.networks {
                 self.server_names.push(network.name.clone());
             }
         }
-        
+
         // Only clone channel list cache when it changes
         if channel_list_len != self.last_channel_list_len {
             self.last_channel_list_len = channel_list_len;
             self.channel_list_cache = vm.channel_list_cache.clone();
         }
-        
+
         // Only rebuild buffer refs when buffer count changes
         if buffer_count != self.last_buffer_count {
             self.last_buffer_count = buffer_count;
             self.buffer_refs = Vec::with_capacity(buffer_count);
             for buffer in &vm.buffers {
-                self.buffer_refs.push((buffer.id.network.clone(), buffer.id.name.clone()));
+                self.buffer_refs
+                    .push((buffer.id.network.clone(), buffer.id.name.clone()));
             }
         }
 
@@ -336,10 +359,18 @@ impl UiEngine {
             .split(root[0]);
 
         // Calculate indices based on which sidebars are visible
-        let left_area = if self.show_left_sidebar { Some(top[0]) } else { None };
+        let left_area = if self.show_left_sidebar {
+            Some(top[0])
+        } else {
+            None
+        };
         let chat_idx = if self.show_left_sidebar { 1 } else { 0 };
         let chat_area = top[chat_idx];
-        let right_area = if self.show_right_sidebar { Some(top[top.len() - 1]) } else { None };
+        let right_area = if self.show_right_sidebar {
+            Some(top[top.len() - 1])
+        } else {
+            None
+        };
 
         // Store layout regions for mouse hit testing
         self.region_chat = Some(chat_area);
@@ -349,18 +380,30 @@ impl UiEngine {
 
         // Build unified sidebar items
         self.sidebar_items = self.build_sidebar_items(vm);
+        self.sidebar_buffer_indices = self
+            .sidebar_items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| item.buffer_id().is_some().then_some(idx))
+            .collect();
 
         // Clamp sidebar selection
         if self.sidebar_items.is_empty() {
             self.sidebar_selected = 0;
         } else {
-            self.sidebar_selected = self.sidebar_selected.min(self.sidebar_items.len().saturating_sub(1));
+            self.sidebar_selected = self
+                .sidebar_selected
+                .min(self.sidebar_items.len().saturating_sub(1));
         }
 
         // Sync selection with active buffer
         if let Some(ref buffer) = vm.active_buffer {
             let target = (buffer.id.network.clone(), buffer.id.name.clone());
-            if let Some(idx) = self.sidebar_items.iter().position(|item| item.buffer_id() == Some(target.clone())) {
+            if let Some(idx) = self
+                .sidebar_items
+                .iter()
+                .position(|item| item.buffer_id() == Some(target.clone()))
+            {
                 self.sidebar_selected = idx;
             }
         }
@@ -370,39 +413,42 @@ impl UiEngine {
             let sidebar_list_items: Vec<ListItem> = self
                 .sidebar_items
                 .iter()
-                .map(|item| {
-                    match item {
-                        SidebarItem::Profile { name } => {
-                            let connected = vm.networks.iter().any(|n| &n.name == name && n.connected);
-                            let icon = if connected { "●" } else { "○" };
-                            ListItem::new(Line::from(Span::styled(
-                                format!("{icon} {name}"),
-                                Style::default().add_modifier(Modifier::BOLD),
-                            )))
-                        }
-                        SidebarItem::ChannelsHeader { profile } => {
-                            let collapsed = self.sidebar_collapse.get(&(profile.clone(), SidebarSection::Channels)).copied().unwrap_or(false);
-                            let arrow = if collapsed { "▸" } else { "▾" };
-                            ListItem::new(Line::from(Span::styled(
-                                format!("  {arrow} channels"),
-                                Style::default().fg(Color::DarkGray),
-                            )))
-                        }
-                        SidebarItem::Channel { name, .. } => {
-                            ListItem::new(format!("    {name}"))
-                        }
-                        SidebarItem::ChatsHeader { profile } => {
-                            let collapsed = self.sidebar_collapse.get(&(profile.clone(), SidebarSection::Chats)).copied().unwrap_or(false);
-                            let arrow = if collapsed { "▸" } else { "▾" };
-                            ListItem::new(Line::from(Span::styled(
-                                format!("  {arrow} chats"),
-                                Style::default().fg(Color::DarkGray),
-                            )))
-                        }
-                        SidebarItem::Chat { name, .. } => {
-                            ListItem::new(format!("    {name}"))
-                        }
+                .map(|item| match item {
+                    SidebarItem::Profile { name } => {
+                        let connected = vm.networks.iter().any(|n| &n.name == name && n.connected);
+                        let icon = if connected { "●" } else { "○" };
+                        ListItem::new(Line::from(Span::styled(
+                            format!("{icon} {name}"),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )))
                     }
+                    SidebarItem::Status { .. } => ListItem::new("    status"),
+                    SidebarItem::ChannelsHeader { profile } => {
+                        let collapsed = self
+                            .sidebar_collapse
+                            .get(&(profile.clone(), SidebarSection::Channels))
+                            .copied()
+                            .unwrap_or(false);
+                        let arrow = if collapsed { "▸" } else { "▾" };
+                        ListItem::new(Line::from(Span::styled(
+                            format!("  {arrow} channels"),
+                            Style::default().fg(Color::DarkGray),
+                        )))
+                    }
+                    SidebarItem::Channel { name, .. } => ListItem::new(format!("    {name}")),
+                    SidebarItem::ChatsHeader { profile } => {
+                        let collapsed = self
+                            .sidebar_collapse
+                            .get(&(profile.clone(), SidebarSection::Chats))
+                            .copied()
+                            .unwrap_or(false);
+                        let arrow = if collapsed { "▸" } else { "▾" };
+                        ListItem::new(Line::from(Span::styled(
+                            format!("  {arrow} chats"),
+                            Style::default().fg(Color::DarkGray),
+                        )))
+                    }
+                    SidebarItem::Chat { name, .. } => ListItem::new(format!("    {name}")),
                 })
                 .collect();
 
@@ -413,12 +459,18 @@ impl UiEngine {
 
             frame.render_stateful_widget(
                 List::new(sidebar_list_items)
-                    .highlight_style(focus_style(&self.theme, self.focus_pane == FocusPane::Sidebar))
+                    .highlight_style(focus_style(
+                        &self.theme,
+                        self.focus_pane == FocusPane::Sidebar,
+                    ))
                     .block(
                         Block::default()
                             .title("Buffers")
                             .borders(Borders::ALL)
-                            .border_style(border_style(&self.theme, self.focus_pane == FocusPane::Sidebar)),
+                            .border_style(border_style(
+                                &self.theme,
+                                self.focus_pane == FocusPane::Sidebar,
+                            )),
                     ),
                 sidebar_area,
                 &mut sidebar_state,
@@ -508,25 +560,27 @@ impl UiEngine {
             .as_ref()
             .map(|buffer| buffer.nicklist.clone())
             .unwrap_or_default();
-        
+
         // Apply filter if active
-        let filtered_nicks: Vec<String> = if self.nicklist_filtering && !self.nicklist_filter.is_empty() {
-            let filter_lower = self.nicklist_filter.to_lowercase();
-            raw_nicks.iter()
-                .filter(|nick| nick.to_lowercase().contains(&filter_lower))
-                .cloned()
-                .collect()
-        } else {
-            raw_nicks.clone()
-        };
-        
+        let filtered_nicks: Vec<String> =
+            if self.nicklist_filtering && !self.nicklist_filter.is_empty() {
+                let filter_lower = self.nicklist_filter.to_lowercase();
+                raw_nicks
+                    .iter()
+                    .filter(|nick| nick.to_lowercase().contains(&filter_lower))
+                    .cloned()
+                    .collect()
+            } else {
+                raw_nicks.clone()
+            };
+
         self.nick_refs = filtered_nicks.clone();
-        
+
         let nick_items: Vec<ListItem> = filtered_nicks
             .iter()
             .map(|nick| ListItem::new(nick.clone()))
             .collect();
-        
+
         if self.nick_refs.is_empty() {
             self.nick_selected = 0;
             self.nicklist_scroll = 0;
@@ -623,7 +677,13 @@ impl UiEngine {
         }
 
         if self.keymap_editor.open {
-            render_selection_editor(frame, area, "Keymap Editor", &self.keymap_editor, &self.theme);
+            render_selection_editor(
+                frame,
+                area,
+                "Keymap Editor",
+                &self.keymap_editor,
+                &self.theme,
+            );
         }
 
         if self.close_confirm_open {
@@ -644,12 +704,13 @@ impl UiEngine {
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Vec<UiIntent> {
         let pos = (mouse.column, mouse.row);
-        
+
         // Helper to check if position is within a rect
         let in_rect = |rect: Option<Rect>| -> bool {
             rect.map(|r| {
                 pos.0 >= r.x && pos.0 < r.x + r.width && pos.1 >= r.y && pos.1 < r.y + r.height
-            }).unwrap_or(false)
+            })
+            .unwrap_or(false)
         };
 
         match mouse.kind {
@@ -677,7 +738,8 @@ impl UiEngine {
                 if in_rect(self.region_nicklist) {
                     // Scroll nicklist down
                     if !self.nick_refs.is_empty() {
-                        self.nick_selected = (self.nick_selected + 3).min(self.nick_refs.len().saturating_sub(1));
+                        self.nick_selected =
+                            (self.nick_selected + 3).min(self.nick_refs.len().saturating_sub(1));
                     }
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else if in_rect(self.region_chat) {
@@ -685,7 +747,8 @@ impl UiEngine {
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else if in_rect(self.region_sidebar) {
                     if !self.sidebar_items.is_empty() {
-                        self.sidebar_selected = (self.sidebar_selected + 1).min(self.sidebar_items.len().saturating_sub(1));
+                        self.sidebar_selected = (self.sidebar_selected + 1)
+                            .min(self.sidebar_items.len().saturating_sub(1));
                     }
                     vec![UiIntent::Event(UiEvent::Tick)]
                 } else {
@@ -701,19 +764,23 @@ impl UiEngine {
                         if rel_y < self.sidebar_items.len() {
                             self.sidebar_selected = rel_y;
                             self.focus_pane = FocusPane::Sidebar;
-                            
+
                             // Handle click action based on item type
                             if let Some(item) = self.sidebar_items.get(rel_y).cloned() {
                                 if let Some((profile, section)) = item.profile_section() {
                                     // Toggle collapse for headers
                                     let key = (profile, section);
-                                    let collapsed = self.sidebar_collapse.get(&key).copied().unwrap_or(false);
+                                    let collapsed =
+                                        self.sidebar_collapse.get(&key).copied().unwrap_or(false);
                                     self.sidebar_collapse.insert(key, !collapsed);
                                 } else if let Some((network, name)) = item.buffer_id() {
                                     // Switch to buffer
                                     return vec![
                                         UiIntent::Event(UiEvent::Tick),
-                                        UiIntent::SubmitLine(format!("/buffer {} {}", network, name)),
+                                        UiIntent::SubmitLine(format!(
+                                            "/buffer {} {}",
+                                            network, name
+                                        )),
                                     ];
                                 }
                             }
@@ -851,10 +918,7 @@ impl UiEngine {
                 return self.open_pm_from_nicklist();
             }
             // Enter toggles collapse on sidebar headers, or switches to buffer
-            KeyCode::Enter
-                if self.focus_pane == FocusPane::Sidebar
-                    && self.composer.is_none() =>
-            {
+            KeyCode::Enter if self.focus_pane == FocusPane::Sidebar && self.composer.is_none() => {
                 if let Some(item) = self.sidebar_items.get(self.sidebar_selected).cloned() {
                     if let Some((profile, section)) = item.profile_section() {
                         // Toggle collapse for headers
@@ -871,8 +935,7 @@ impl UiEngine {
             }
             // "/" starts nicklist filter mode when nicklist is focused
             KeyCode::Char('/')
-                if self.focus_pane == FocusPane::Nicklist
-                    && !self.nicklist_filtering =>
+                if self.focus_pane == FocusPane::Nicklist && !self.nicklist_filtering =>
             {
                 self.nicklist_filtering = true;
                 self.nicklist_filter.clear();
@@ -1370,36 +1433,26 @@ impl UiEngine {
                 if self.sidebar_items.is_empty() {
                     return Vec::new();
                 }
-                
-                let start = self.sidebar_selected;
-                let len = self.sidebar_items.len();
-                
-                // Navigate in the given direction, skipping non-buffer items
-                // to allow up/down to move between all buffers (status, channels, chats)
-                loop {
-                    if direction < 0 {
-                        self.sidebar_selected = self
-                            .sidebar_selected
-                            .checked_sub(1)
-                            .unwrap_or(len.saturating_sub(1));
-                    } else {
-                        self.sidebar_selected = (self.sidebar_selected + 1) % len;
-                    }
-                    
-                    // Check if we've wrapped around completely (no buffer items)
-                    if self.sidebar_selected == start {
-                        break;
-                    }
-                    
-                    // Stop if we hit a buffer item
-                    if let Some(item) = self.sidebar_items.get(self.sidebar_selected) {
-                        if item.buffer_id().is_some() {
-                            break;
-                        }
-                    }
+
+                if self.sidebar_buffer_indices.is_empty() {
+                    return vec![UiIntent::Event(UiEvent::Tick)];
                 }
-                
-                // If navigating to a buffer item, switch to it
+
+                let idx_len = self.sidebar_buffer_indices.len();
+                let current_pos = self
+                    .sidebar_buffer_indices
+                    .iter()
+                    .position(|idx| *idx == self.sidebar_selected);
+                let next_pos = match current_pos {
+                    Some(pos) if direction < 0 => {
+                        pos.checked_sub(1).unwrap_or(idx_len.saturating_sub(1))
+                    }
+                    Some(pos) => (pos + 1) % idx_len,
+                    None if direction < 0 => idx_len.saturating_sub(1),
+                    None => 0,
+                };
+                self.sidebar_selected = self.sidebar_buffer_indices[next_pos];
+
                 if let Some(item) = self.sidebar_items.get(self.sidebar_selected) {
                     if let Some((network, name)) = item.buffer_id() {
                         return vec![UiIntent::SubmitLine(format!("/buffer {network} {name}"))];
@@ -1460,12 +1513,8 @@ impl UiEngine {
             SidebarItem::Channel { profile, .. } => {
                 Some((profile.clone(), SidebarSection::Channels))
             }
-            SidebarItem::ChatsHeader { profile } => {
-                Some((profile.clone(), SidebarSection::Chats))
-            }
-            SidebarItem::Chat { profile, .. } => {
-                Some((profile.clone(), SidebarSection::Chats))
-            }
+            SidebarItem::ChatsHeader { profile } => Some((profile.clone(), SidebarSection::Chats)),
+            SidebarItem::Chat { profile, .. } => Some((profile.clone(), SidebarSection::Chats)),
             _ => None,
         }
     }
@@ -1476,14 +1525,19 @@ impl UiEngine {
 
         for network in &vm.networks {
             let profile = &network.name;
-            
-            // Profile header - clicking shows status buffer content
-            items.push(SidebarItem::Profile { name: profile.clone() });
-            
+
+            // Profile header and status buffer entry.
+            items.push(SidebarItem::Profile {
+                name: profile.clone(),
+            });
+            items.push(SidebarItem::Status {
+                profile: profile.clone(),
+            });
+
             // Collect channels and chats for this profile
             let mut channels: Vec<String> = Vec::new();
             let mut chats: Vec<String> = Vec::new();
-            
+
             for buf in &vm.buffers {
                 if &buf.id.network != profile || buf.id.name == "status" {
                     continue;
@@ -1494,40 +1548,52 @@ impl UiEngine {
                     chats.push(buf.id.name.clone());
                 }
             }
-            
+
             // Channels section (if any)
             if !channels.is_empty() {
-                let collapsed = self.sidebar_collapse
+                let collapsed = self
+                    .sidebar_collapse
                     .get(&(profile.clone(), SidebarSection::Channels))
                     .copied()
                     .unwrap_or(false);
-                    
-                items.push(SidebarItem::ChannelsHeader { profile: profile.clone() });
-                
+
+                items.push(SidebarItem::ChannelsHeader {
+                    profile: profile.clone(),
+                });
+
                 if !collapsed {
                     for chan in channels {
-                        items.push(SidebarItem::Channel { profile: profile.clone(), name: chan });
+                        items.push(SidebarItem::Channel {
+                            profile: profile.clone(),
+                            name: chan,
+                        });
                     }
                 }
             }
-            
+
             // Chats section (if any)
             if !chats.is_empty() {
-                let collapsed = self.sidebar_collapse
+                let collapsed = self
+                    .sidebar_collapse
                     .get(&(profile.clone(), SidebarSection::Chats))
                     .copied()
                     .unwrap_or(false);
-                    
-                items.push(SidebarItem::ChatsHeader { profile: profile.clone() });
-                
+
+                items.push(SidebarItem::ChatsHeader {
+                    profile: profile.clone(),
+                });
+
                 if !collapsed {
                     for chat in chats {
-                        items.push(SidebarItem::Chat { profile: profile.clone(), name: chat });
+                        items.push(SidebarItem::Chat {
+                            profile: profile.clone(),
+                            name: chat,
+                        });
                     }
                 }
             }
         }
-        
+
         items
     }
 

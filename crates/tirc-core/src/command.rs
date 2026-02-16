@@ -177,8 +177,18 @@ impl CommandRegistry {
         }
 
         let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
-        // Parse arguments with quote support for profile names with spaces
-        let parts_owned = parse_command_args(stripped);
+        // Parse arguments with quote and escape support.
+        let parts_owned = match parse_command_args(stripped) {
+            Ok(parts) => parts,
+            Err(err) => {
+                let command = stripped.split_whitespace().next().unwrap_or("input");
+                out.events.push(failed(
+                    command,
+                    &format!("failed to parse command arguments: {err}"),
+                ));
+                return out;
+            }
+        };
         if parts_owned.is_empty() {
             return out;
         }
@@ -208,8 +218,10 @@ impl CommandRegistry {
                         detail: format!("Joining {profile}/{channel}"),
                     }));
                 } else {
-                    out.events
-                        .push(failed("join", "usage: /join [profile] <#channel> (profile defaults to focused)"));
+                    out.events.push(failed(
+                        "join",
+                        "usage: /join [profile] <#channel> (profile defaults to focused)",
+                    ));
                 }
             }
             "part" => {
@@ -377,18 +389,16 @@ impl CommandRegistry {
                 }
             }
             "theme" => {
-                out.events.push(AppEvent::Ui(UiEvent::Action(
-                    UiAction::ThemeEditorToggle,
-                )));
+                out.events
+                    .push(AppEvent::Ui(UiEvent::Action(UiAction::ThemeEditorToggle)));
                 out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                     command,
                     detail: "Theme editor opened".to_owned(),
                 }));
             }
             "keymap" => {
-                out.events.push(AppEvent::Ui(UiEvent::Action(
-                    UiAction::KeymapEditorToggle,
-                )));
+                out.events
+                    .push(AppEvent::Ui(UiEvent::Action(UiAction::KeymapEditorToggle)));
                 out.events.push(AppEvent::Command(CommandEvent::Succeeded {
                     command,
                     detail: "Keymap editor opened".to_owned(),
@@ -593,55 +603,89 @@ fn nick_usage(state: &AppState) -> String {
     }
 }
 
-/// Parse command arguments supporting quoted strings.
-/// 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandArgParseError {
+    UnclosedQuote { quote: char },
+    TrailingEscape,
+}
+
+impl std::fmt::Display for CommandArgParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnclosedQuote { quote } => {
+                write!(f, "unclosed quote: {quote}")
+            }
+            Self::TrailingEscape => write!(f, "trailing escape character"),
+        }
+    }
+}
+
+/// Parse command arguments supporting quoted strings and `\` escapes.
+///
 /// Handles both single and double quotes. Unquoted arguments are split by whitespace.
+/// Backslash escapes the next character both inside and outside quotes.
 /// Examples:
 /// - `profile "My Server"` -> ["profile", "My Server"]
 /// - `"My Profile" #channel` -> ["My Profile", "#channel"]
 /// - `simple args` -> ["simple", "args"]
-fn parse_command_args(input: &str) -> Vec<String> {
+fn parse_command_args(input: &str) -> Result<Vec<String>, CommandArgParseError> {
     let mut args = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
-    let mut quote_char: char = '"';
-    let mut chars = input.chars().peekable();
+    let mut in_quotes: Option<char> = None;
+    let mut escaped = false;
+    let mut token_started = false;
 
-    while let Some(c) = chars.next() {
-        if in_quotes {
-            if c == quote_char {
-                // End of quoted string
-                in_quotes = false;
-                if !current.is_empty() {
-                    args.push(std::mem::take(&mut current));
-                }
-            } else {
-                current.push(c);
-            }
-        } else if c == '"' || c == '\'' {
-            // Start of quoted string
-            in_quotes = true;
-            quote_char = c;
-            // Push any pending unquoted content
-            if !current.is_empty() {
-                args.push(std::mem::take(&mut current));
-            }
-        } else if c.is_whitespace() {
-            // End of unquoted argument
-            if !current.is_empty() {
-                args.push(std::mem::take(&mut current));
-            }
-        } else {
+    for c in input.chars() {
+        if escaped {
             current.push(c);
+            token_started = true;
+            escaped = false;
+            continue;
+        }
+
+        if c == '\\' {
+            escaped = true;
+            token_started = true;
+            continue;
+        }
+
+        match in_quotes {
+            Some(quote) if c == quote => {
+                in_quotes = None;
+            }
+            Some(_) => {
+                current.push(c);
+                token_started = true;
+            }
+            None if c == '"' || c == '\'' => {
+                in_quotes = Some(c);
+                token_started = true;
+            }
+            None if c.is_whitespace() => {
+                if token_started {
+                    args.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            None => {
+                current.push(c);
+                token_started = true;
+            }
         }
     }
 
-    // Push any remaining content
-    if !current.is_empty() {
+    if escaped {
+        return Err(CommandArgParseError::TrailingEscape);
+    }
+    if let Some(quote) = in_quotes {
+        return Err(CommandArgParseError::UnclosedQuote { quote });
+    }
+
+    if token_started {
         args.push(current);
     }
 
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -661,7 +705,9 @@ mod tests {
                 assert_eq!(network, "net");
                 assert_eq!(channel, "#rust");
             }
-            other => panic!("unexpected outbound: {other:?}"),
+            other => {
+                panic!("unexpected outbound: {other:?}");
+            }
         }
     }
 
@@ -768,26 +814,63 @@ mod tests {
 
     #[test]
     fn parse_command_args_simple() {
-        let args = parse_command_args("connect myprofile");
+        let args = parse_command_args("connect myprofile").unwrap();
         assert_eq!(args, vec!["connect", "myprofile"]);
     }
 
     #[test]
     fn parse_command_args_quoted() {
-        let args = parse_command_args(r#"connect "My Profile""#);
+        let args = parse_command_args(r#"connect "My Profile""#).unwrap();
         assert_eq!(args, vec!["connect", "My Profile"]);
     }
 
     #[test]
     fn parse_command_args_single_quoted() {
-        let args = parse_command_args("connect 'Profile With Spaces'");
+        let args = parse_command_args("connect 'Profile With Spaces'").unwrap();
         assert_eq!(args, vec!["connect", "Profile With Spaces"]);
     }
 
     #[test]
     fn parse_command_args_multiple_quoted() {
-        let args = parse_command_args("\"My Profile\" #test message");
+        let args = parse_command_args("\"My Profile\" #test message").unwrap();
         assert_eq!(args, vec!["My Profile", "#test", "message"]);
+    }
+
+    #[test]
+    fn parse_command_args_escaped_quote() {
+        let args = parse_command_args(r#"msg #rust "Hello \"World\"""#).unwrap();
+        assert_eq!(args, vec!["msg", "#rust", "Hello \"World\""]);
+    }
+
+    #[test]
+    fn parse_command_args_escaped_single_quote() {
+        let args = parse_command_args(r"msg #rust 'test\'s'").unwrap();
+        assert_eq!(args, vec!["msg", "#rust", "test's"]);
+    }
+
+    #[test]
+    fn parse_command_args_unclosed_quote() {
+        let err = parse_command_args(r#"msg #rust "unclosed"#).unwrap_err();
+        assert_eq!(err, CommandArgParseError::UnclosedQuote { quote: '"' });
+    }
+
+    #[test]
+    fn parse_command_args_trailing_escape() {
+        let err = parse_command_args(r#"msg #rust test\"#).unwrap_err();
+        assert_eq!(err, CommandArgParseError::TrailingEscape);
+    }
+
+    #[test]
+    fn execute_line_reports_parse_error() {
+        let registry = CommandRegistry::default_registry();
+        let mut state = AppState::new(100, 1000);
+        let output = registry.execute_line(&mut state, CommandSource::Slash, r#"/msg #rust "oops"#);
+
+        assert!(matches!(
+            output.events.first(),
+            Some(AppEvent::Command(CommandEvent::Failed { command, .. }))
+                if command == "msg"
+        ));
     }
 
     #[test]
