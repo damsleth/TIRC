@@ -1401,7 +1401,7 @@ impl UiEngine {
                 self.submit_join_line(profile, raw)
             }
             Some(ComposerMode::MsgTarget { profile }) => {
-                let target = self.input.text().trim().to_owned();
+                let target = strip_nick_prefix(self.input.text().trim()).to_owned();
                 if target.is_empty() {
                     return Vec::new();
                 }
@@ -1724,4 +1724,27 @@ fn flatten_keymap(keymap: &Keymap) -> HashMap<String, UiAction> {
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_nick_prefix;
+
+    #[test]
+    fn strip_nick_prefix_removes_status() {
+        let cases = [
+            ("~owner", "owner"),
+            ("&admin", "admin"),
+            ("@op", "op"),
+            ("%half", "half"),
+            ("+voice", "voice"),
+            ("plain", "plain"),
+            ("@@double", "double"),
+            ("", ""),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(strip_nick_prefix(input), expected);
+        }
+    }
 }
