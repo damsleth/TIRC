@@ -283,9 +283,9 @@ mod tests {
     #[test]
     fn test_history_ignores_empty() {
         let mut hist = InputHistory::new(100);
-        hist.push("".to_string());
+        hist.push(String::new());
         hist.push("real".to_string());
-        hist.push("".to_string());
+        hist.push(String::new());
 
         assert_eq!(hist.prev("x"), Some("real"));
         assert_eq!(hist.prev("x"), Some("real")); // only one entry

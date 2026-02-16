@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn parse_command_args_trailing_escape() {
-        let err = parse_command_args(r#"msg #rust test\"#).unwrap_err();
+        let err = parse_command_args(r"msg #rust test\").unwrap_err();
         assert_eq!(err, CommandArgParseError::TrailingEscape);
     }
 

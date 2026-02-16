@@ -35,6 +35,7 @@ async fn connect_join_part_nick_against_real_ircd() -> Result<()> {
     let channel = format!("#tirc_ci_{suffix}");
 
     write_line(&mut writer, "CAP LS 302").await?;
+    write_line(&mut writer, "CAP END").await?;
     write_line(&mut writer, &format!("NICK {current_nick}")).await?;
     write_line(&mut writer, "USER tirc 0 * :TIRC CI").await?;
 
@@ -61,9 +62,8 @@ async fn connect_join_part_nick_against_real_ircd() -> Result<()> {
             bail!("IRCd closed connection before completing test scenario");
         }
 
-        let message = match line.parse::<Message>() {
-            Ok(message) => message,
-            Err(_) => continue,
+        let Ok(message) = line.parse::<Message>() else {
+            continue;
         };
 
         match message.command {

@@ -782,7 +782,7 @@ mod tests {
                 network: "test".to_string(),
                 channel: format!("#channel{}", i),
                 users: i as u32,
-                topic: "".to_string(),
+                topic: String::new(),
             }));
         }
 
