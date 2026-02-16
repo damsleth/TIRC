@@ -1692,14 +1692,23 @@ impl UiEngine {
         else {
             return Vec::new();
         };
+        let target = strip_nick_prefix(&target).to_owned();
+        if target.is_empty() {
+            return Vec::new();
+        }
         self.focus_pane = FocusPane::Input;
         vec![UiIntent::SubmitLine(format!("/query {profile} {target}"))]
     }
 
     fn lookup_action(&self, key: KeyEvent) -> Option<UiAction> {
+
         let canonical = canonical_key(key);
         self.keymap_actions.get(&canonical).copied()
     }
+}
+
+fn strip_nick_prefix(nick: &str) -> &str {
+    nick.trim_start_matches(&['~', '&', '@', '%', '+'][..])
 }
 
 fn flatten_keymap(keymap: &Keymap) -> HashMap<String, UiAction> {
