@@ -275,6 +275,13 @@ impl AppState {
                 if let Some(n) = self.networks.get_mut(&network) {
                     n.channels.remove(&channel);
                 }
+                // Remove the buffer so it disappears from sidebar
+                let buf_id = BufferId::new(&network, &channel);
+                self.buffers.remove(&buf_id);
+                // If parted buffer was focused, move focus to another buffer
+                if self.focus.as_ref() == Some(&buf_id) {
+                    self.focus = self.buffers.keys().next().cloned();
+                }
                 self.set_status(format!(
                     "Parted {channel}: {}",
                     reason.unwrap_or_else(|| "-".to_owned())
