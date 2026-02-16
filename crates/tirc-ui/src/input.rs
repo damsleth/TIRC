@@ -116,7 +116,7 @@ impl InputEditor {
 }
 
 /// Safe wrapper for input history navigation.
-/// 
+///
 /// Encapsulates history entries, current navigation index, and draft text
 /// to prevent out-of-bounds access and ensure consistent state.
 #[derive(Debug, Clone, Default)]
@@ -185,7 +185,9 @@ impl InputHistory {
             }
         }
 
-        self.index.and_then(|idx| self.entries.get(idx)).map(String::as_str)
+        self.index
+            .and_then(|idx| self.entries.get(idx))
+            .map(String::as_str)
     }
 
     /// Navigate to newer (more recent) entry. Returns the text to display, if any.
@@ -281,9 +283,9 @@ mod tests {
     #[test]
     fn test_history_ignores_empty() {
         let mut hist = InputHistory::new(100);
-        hist.push("".to_string());
+        hist.push(String::new());
         hist.push("real".to_string());
-        hist.push("".to_string());
+        hist.push(String::new());
 
         assert_eq!(hist.prev("x"), Some("real"));
         assert_eq!(hist.prev("x"), Some("real")); // only one entry
