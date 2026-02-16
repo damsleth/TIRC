@@ -53,7 +53,7 @@ impl LogWriter {
         } else {
             record.clone()
         };
-        
+
         let date = record_to_write.ts.date_naive();
         let file = self
             .root
@@ -186,13 +186,7 @@ fn redact_sensitive_content(body: &str) -> String {
     }
 
     // --- password/pass key-value patterns (handles all occurrences) ---
-    let kv_patterns: &[&str] = &[
-        "password=",
-        "password:",
-        "password ",
-        "pass=",
-        "pass:",
-    ];
+    let kv_patterns: &[&str] = &["password=", "password:", "password ", "pass=", "pass:"];
 
     let mut result = body.to_owned();
     let mut result_lower = lower;
