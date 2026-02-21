@@ -290,12 +290,12 @@ impl UiEngine {
             caches: UiCaches::default(),
             sidebar: SidebarState {
                 show: initial_sidebar_show,
-                last_was_empty: !initial_sidebar_show,
+                last_was_empty: startup_config.hide_buffer_when_empty,
                 ..Default::default()
             },
             nicklist: NicklistState {
                 show: initial_nicklist_show,
-                last_was_empty: !initial_nicklist_show,
+                last_was_empty: startup_config.hide_nicklist_when_empty,
                 ..Default::default()
             },
             chat: ChatScrollState::default(),
@@ -303,6 +303,26 @@ impl UiEngine {
             startup_config,
             user_toggled_sidebar: false,
             user_toggled_nicklist: false,
+        }
+    }
+
+    /// Update sidebar visibility based on content if auto-hide is enabled and user hasn't toggled.
+    fn update_sidebar_visibility(&mut self, is_empty: bool) {
+        if !self.user_toggled_sidebar && self.startup_config.hide_buffer_when_empty {
+            if is_empty != self.sidebar.last_was_empty {
+                self.sidebar.show = !is_empty;
+                self.sidebar.last_was_empty = is_empty;
+            }
+        }
+    }
+
+    /// Update nicklist visibility based on content if auto-hide is enabled and user hasn't toggled.
+    fn update_nicklist_visibility(&mut self, is_empty: bool) {
+        if !self.user_toggled_nicklist && self.startup_config.hide_nicklist_when_empty {
+            if is_empty != self.nicklist.last_was_empty {
+                self.nicklist.show = !is_empty;
+                self.nicklist.last_was_empty = is_empty;
+            }
         }
     }
 
@@ -412,15 +432,9 @@ impl UiEngine {
         let items = self.build_sidebar_items(vm);
         self.sidebar.tree.rebuild(items);
 
-        // Auto-show/hide sidebars based on startup config if user hasn't toggled them
-        // Only update visibility when empty state changes to avoid unnecessary assignments
-        if !self.user_toggled_sidebar && self.startup_config.hide_buffer_when_empty {
-            let is_empty = self.sidebar.tree.items.is_empty();
-            if is_empty != self.sidebar.last_was_empty {
-                self.sidebar.show = !is_empty;
-                self.sidebar.last_was_empty = is_empty;
-            }
-        }
+        // Update sidebar visibility based on content
+        let sidebar_is_empty = self.sidebar.tree.items.is_empty();
+        self.update_sidebar_visibility(sidebar_is_empty);
 
         // Get nicklist for current buffer to determine nicklist visibility
         let raw_nicks: Vec<String> = vm
@@ -429,15 +443,9 @@ impl UiEngine {
             .map(|buffer| buffer.nicklist.clone())
             .unwrap_or_default();
 
-        // Auto-show/hide nicklist based on startup config if user hasn't toggled it
-        // Only update visibility when empty state changes to avoid unnecessary assignments
-        if !self.user_toggled_nicklist && self.startup_config.hide_nicklist_when_empty {
-            let is_empty = raw_nicks.is_empty();
-            if is_empty != self.nicklist.last_was_empty {
-                self.nicklist.show = !is_empty;
-                self.nicklist.last_was_empty = is_empty;
-            }
-        }
+        // Update nicklist visibility based on content
+        let nicklist_is_empty = raw_nicks.is_empty();
+        self.update_nicklist_visibility(nicklist_is_empty);
 
         let area = frame.area();
         let root = Layout::default()
