@@ -155,6 +155,7 @@ struct SidebarState {
     tree: SidebarTree,
     collapse: HashMap<(String, SidebarSection), bool>,
     show: bool,
+    last_was_empty: bool,
 }
 
 impl Default for SidebarState {
@@ -164,6 +165,7 @@ impl Default for SidebarState {
             tree: SidebarTree::default(),
             collapse: HashMap::new(),
             show: true,
+            last_was_empty: true,
         }
     }
 }
@@ -175,6 +177,7 @@ struct NicklistState {
     filter: String,
     filtering: bool,
     show: bool,
+    last_was_empty: bool,
 }
 
 impl Default for NicklistState {
@@ -185,6 +188,7 @@ impl Default for NicklistState {
             filter: String::new(),
             filtering: false,
             show: true,
+            last_was_empty: true,
         }
     }
 }
@@ -286,10 +290,12 @@ impl UiEngine {
             caches: UiCaches::default(),
             sidebar: SidebarState {
                 show: initial_sidebar_show,
+                last_was_empty: true,
                 ..Default::default()
             },
             nicklist: NicklistState {
                 show: initial_nicklist_show,
+                last_was_empty: true,
                 ..Default::default()
             },
             chat: ChatScrollState::default(),
@@ -407,8 +413,13 @@ impl UiEngine {
         self.sidebar.tree.rebuild(items);
 
         // Auto-show/hide sidebars based on startup config if user hasn't toggled them
+        // Only update visibility when empty state changes to avoid unnecessary assignments
         if !self.user_toggled_sidebar && self.startup_config.hide_buffer_when_empty {
-            self.sidebar.show = !self.sidebar.tree.items.is_empty();
+            let is_empty = self.sidebar.tree.items.is_empty();
+            if is_empty != self.sidebar.last_was_empty {
+                self.sidebar.show = !is_empty;
+                self.sidebar.last_was_empty = is_empty;
+            }
         }
 
         // Get nicklist for current buffer to determine nicklist visibility
@@ -419,8 +430,13 @@ impl UiEngine {
             .unwrap_or_default();
 
         // Auto-show/hide nicklist based on startup config if user hasn't toggled it
+        // Only update visibility when empty state changes to avoid unnecessary assignments
         if !self.user_toggled_nicklist && self.startup_config.hide_nicklist_when_empty {
-            self.nicklist.show = !raw_nicks.is_empty();
+            let is_empty = raw_nicks.is_empty();
+            if is_empty != self.nicklist.last_was_empty {
+                self.nicklist.show = !is_empty;
+                self.nicklist.last_was_empty = is_empty;
+            }
         }
 
         let area = frame.area();
