@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use tirc_config::{Keymap, Theme};
+use tirc_config::{Keymap, StartupConfig, Theme};
 use tirc_core::{AppViewModel, UiAction, UiEvent};
 
 use crate::{
@@ -254,8 +254,14 @@ impl UiEngine {
         active_theme: String,
         keymap_options: Vec<String>,
         active_keymap: String,
+        startup_config: StartupConfig,
     ) -> Self {
         let keymap_actions = flatten_keymap(&keymap);
+
+        // Determine initial sidebar visibility based on startup config
+        // At startup, we assume no buffers yet (they'll be loaded from session if any)
+        let initial_sidebar_show = !startup_config.hide_buffer_when_empty;
+        let initial_nicklist_show = !startup_config.hide_nicklist_when_empty;
 
         Self {
             theme,
@@ -275,8 +281,14 @@ impl UiEngine {
             last_draw: Instant::now(),
             idle_hz,
             caches: UiCaches::default(),
-            sidebar: SidebarState::default(),
-            nicklist: NicklistState::default(),
+            sidebar: SidebarState {
+                show: initial_sidebar_show,
+                ..Default::default()
+            },
+            nicklist: NicklistState {
+                show: initial_nicklist_show,
+                ..Default::default()
+            },
             chat: ChatScrollState::default(),
             regions: LayoutRegions::default(),
         }
