@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub profiles: Vec<ServerProfile>,
     pub notifications: NotificationConfig,
     pub performance: PerformanceConfig,
+    #[serde(default)]
+    pub startup: StartupConfig,
 }
 
 impl Default for AppConfig {
@@ -33,6 +35,7 @@ impl Default for AppConfig {
             profiles: vec![sample_profile()],
             notifications: NotificationConfig::default(),
             performance: PerformanceConfig::default(),
+            startup: StartupConfig::default(),
         }
     }
 }
@@ -123,6 +126,21 @@ impl Default for PerformanceConfig {
 
 const fn default_max_channel_list_entries() -> usize {
     10_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupConfig {
+    pub show_welcome_message: bool,
+    pub welcome_message: String,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            show_welcome_message: true,
+            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette.".to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
