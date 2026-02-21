@@ -241,6 +241,9 @@ pub struct UiEngine {
     nicklist: NicklistState,
     chat: ChatScrollState,
     regions: LayoutRegions,
+    startup_config: StartupConfig,
+    user_toggled_sidebar: bool,
+    user_toggled_nicklist: bool,
 }
 
 impl UiEngine {
@@ -291,6 +294,9 @@ impl UiEngine {
             },
             chat: ChatScrollState::default(),
             regions: LayoutRegions::default(),
+            startup_config,
+            user_toggled_sidebar: false,
+            user_toggled_nicklist: false,
         }
     }
 
@@ -396,6 +402,27 @@ impl UiEngine {
             self.caches.last_buffer_count = buffer_count;
         }
 
+        // Build unified sidebar items early so we can determine visibility
+        let items = self.build_sidebar_items(vm);
+        self.sidebar.tree.rebuild(items);
+
+        // Auto-show/hide sidebars based on startup config if user hasn't toggled them
+        if !self.user_toggled_sidebar && self.startup_config.hide_buffer_when_empty {
+            self.sidebar.show = !self.sidebar.tree.items.is_empty();
+        }
+
+        // Get nicklist for current buffer to determine nicklist visibility
+        let raw_nicks: Vec<String> = vm
+            .active_buffer
+            .as_ref()
+            .map(|buffer| buffer.nicklist.clone())
+            .unwrap_or_default();
+
+        // Auto-show/hide nicklist based on startup config if user hasn't toggled it
+        if !self.user_toggled_nicklist && self.startup_config.hide_nicklist_when_empty {
+            self.nicklist.show = !raw_nicks.is_empty();
+        }
+
         let area = frame.area();
         let root = Layout::default()
             .direction(Direction::Vertical)
@@ -440,10 +467,6 @@ impl UiEngine {
         self.regions.nicklist = right_area;
         self.regions.sidebar = left_area;
         self.regions.input = Some(root[2]);
-
-        // Build unified sidebar items
-        let items = self.build_sidebar_items(vm);
-        self.sidebar.tree.rebuild(items);
 
         // Clamp sidebar selection
         if self.sidebar.tree.items.is_empty() {
@@ -1277,10 +1300,12 @@ impl UiEngine {
             }
             UiAction::SidebarLeftToggle => {
                 self.sidebar.show = !self.sidebar.show;
+                self.user_toggled_sidebar = true;
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
             UiAction::SidebarRightToggle => {
                 self.nicklist.show = !self.nicklist.show;
+                self.user_toggled_nicklist = true;
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
             // Forward other actions to the app layer
