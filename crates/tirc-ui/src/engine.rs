@@ -165,7 +165,7 @@ impl Default for SidebarState {
             tree: SidebarTree::default(),
             collapse: HashMap::new(),
             show: true,
-            last_was_empty: true,
+            last_was_empty: false,
         }
     }
 }
@@ -188,7 +188,7 @@ impl Default for NicklistState {
             filter: String::new(),
             filtering: false,
             show: true,
-            last_was_empty: true,
+            last_was_empty: false,
         }
     }
 }
@@ -290,12 +290,12 @@ impl UiEngine {
             caches: UiCaches::default(),
             sidebar: SidebarState {
                 show: initial_sidebar_show,
-                last_was_empty: true,
+                last_was_empty: !initial_sidebar_show,
                 ..Default::default()
             },
             nicklist: NicklistState {
                 show: initial_nicklist_show,
-                last_was_empty: true,
+                last_was_empty: !initial_nicklist_show,
                 ..Default::default()
             },
             chat: ChatScrollState::default(),
