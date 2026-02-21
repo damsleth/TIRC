@@ -1,4 +1,5 @@
 # DEVLOG
+- (pending) feat(config,ui): add startup.showWelcomeMessage and startup.welcomeMessage config
 - `4a191f1` fix: bound channel_list_cache to prevent memory exhaustion
 - `17bc3f2` fix: limit nick collision retries to prevent infinite loop
 - `0793015` refactor: replace magic action strings with UiAction enum
