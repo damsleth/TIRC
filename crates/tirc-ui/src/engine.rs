@@ -575,10 +575,14 @@ impl UiEngine {
             .unwrap_or_else(|| {
                 // Show welcome message when no buffer is active
                 if self.show_welcome_message {
-                    vec![Line::from(Span::styled(
-                        &self.welcome_message,
-                        Style::default().fg(parse_color(&self.theme.palette.foreground)),
-                    ))]
+                    vec![
+                        Line::from(""),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            &self.welcome_message,
+                            Style::default().fg(parse_color(&self.theme.palette.foreground)),
+                        )),
+                    ]
                 } else {
                     Vec::new()
                 }

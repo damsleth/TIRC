@@ -138,7 +138,7 @@ impl Default for StartupConfig {
     fn default() -> Self {
         Self {
             show_welcome_message: true,
-            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette.".to_owned(),
+            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette.".to_string(),
         }
     }
 }
@@ -359,7 +359,7 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.startup.show_welcome_message = false;
         cfg.startup.welcome_message = "Custom welcome message".to_owned();
-        
+
         save_config(&config_file, &cfg).expect("save");
 
         let paths = AppPaths {
@@ -375,7 +375,7 @@ mod tests {
 
         paths.ensure_dirs().expect("dirs");
         let loaded = load_config(&paths, Some(&config_file)).expect("load config");
-        
+
         assert!(!loaded.config.startup.show_welcome_message);
         assert_eq!(loaded.config.startup.welcome_message, "Custom welcome message");
     }
