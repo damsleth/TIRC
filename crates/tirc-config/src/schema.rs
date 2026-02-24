@@ -138,7 +138,8 @@ impl Default for StartupConfig {
     fn default() -> Self {
         Self {
             show_welcome_message: true,
-            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette.".to_string(),
+            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette."
+                .to_string(),
         }
     }
 }
@@ -377,6 +378,9 @@ mod tests {
         let loaded = load_config(&paths, Some(&config_file)).expect("load config");
 
         assert!(!loaded.config.startup.show_welcome_message);
-        assert_eq!(loaded.config.startup.welcome_message, "Custom welcome message");
+        assert_eq!(
+            loaded.config.startup.welcome_message,
+            "Custom welcome message"
+        );
     }
 }
