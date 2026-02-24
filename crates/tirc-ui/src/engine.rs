@@ -308,21 +308,23 @@ impl UiEngine {
 
     /// Update sidebar visibility based on content if auto-hide is enabled and user hasn't toggled.
     fn update_sidebar_visibility(&mut self, is_empty: bool) {
-        if !self.user_toggled_sidebar && self.startup_config.hide_buffer_when_empty {
-            if is_empty != self.sidebar.last_was_empty {
-                self.sidebar.show = !is_empty;
-                self.sidebar.last_was_empty = is_empty;
-            }
+        if !self.user_toggled_sidebar
+            && self.startup_config.hide_buffer_when_empty
+            && is_empty != self.sidebar.last_was_empty
+        {
+            self.sidebar.show = !is_empty;
+            self.sidebar.last_was_empty = is_empty;
         }
     }
 
     /// Update nicklist visibility based on content if auto-hide is enabled and user hasn't toggled.
     fn update_nicklist_visibility(&mut self, is_empty: bool) {
-        if !self.user_toggled_nicklist && self.startup_config.hide_nicklist_when_empty {
-            if is_empty != self.nicklist.last_was_empty {
-                self.nicklist.show = !is_empty;
-                self.nicklist.last_was_empty = is_empty;
-            }
+        if !self.user_toggled_nicklist
+            && self.startup_config.hide_nicklist_when_empty
+            && is_empty != self.nicklist.last_was_empty
+        {
+            self.nicklist.show = !is_empty;
+            self.nicklist.last_was_empty = is_empty;
         }
     }
 

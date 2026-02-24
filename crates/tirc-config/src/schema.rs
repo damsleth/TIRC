@@ -59,19 +59,10 @@ impl Default for UiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StartupConfig {
     pub hide_buffer_when_empty: bool,
     pub hide_nicklist_when_empty: bool,
-}
-
-impl Default for StartupConfig {
-    fn default() -> Self {
-        Self {
-            hide_buffer_when_empty: false,
-            hide_nicklist_when_empty: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
