@@ -22,6 +22,8 @@ pub struct AppConfig {
     pub profiles: Vec<ServerProfile>,
     pub notifications: NotificationConfig,
     pub performance: PerformanceConfig,
+    #[serde(default)]
+    pub startup: StartupConfig,
 }
 
 impl Default for AppConfig {
@@ -33,6 +35,7 @@ impl Default for AppConfig {
             profiles: vec![sample_profile()],
             notifications: NotificationConfig::default(),
             performance: PerformanceConfig::default(),
+            startup: StartupConfig::default(),
         }
     }
 }
@@ -123,6 +126,22 @@ impl Default for PerformanceConfig {
 
 const fn default_max_channel_list_entries() -> usize {
     10_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupConfig {
+    pub show_welcome_message: bool,
+    pub welcome_message: String,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            show_welcome_message: true,
+            welcome_message: "Welcome to TIRC! Press Ctrl-P to show the command palette."
+                .to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +318,11 @@ mod tests {
         assert!(loaded.config.profiles[0].enabled);
         assert_eq!(loaded.config.profiles[0].host, "irc.homelien.no");
         assert_eq!(loaded.config.profiles[0].port, 6666);
+        assert!(loaded.config.startup.show_welcome_message);
+        assert_eq!(
+            loaded.config.startup.welcome_message,
+            "Welcome to TIRC! Press Ctrl-P to show the command palette."
+        );
     }
 
     #[cfg(unix)]
@@ -326,5 +350,37 @@ mod tests {
 
         let err = load_config(&paths, Some(&config_file)).expect_err("should fail permissions");
         assert!(matches!(err, ConfigError::InsecurePermissions { .. }));
+    }
+
+    #[test]
+    fn startup_config_can_be_customized() {
+        let dir = tempdir().expect("tempdir");
+        let config_file = dir.path().join("config.toml");
+
+        let mut cfg = AppConfig::default();
+        cfg.startup.show_welcome_message = false;
+        cfg.startup.welcome_message = "Custom welcome message".to_owned();
+
+        save_config(&config_file, &cfg).expect("save");
+
+        let paths = AppPaths {
+            config_dir: dir.path().to_path_buf(),
+            state_dir: dir.path().join("state"),
+            cache_dir: dir.path().join("cache"),
+            config_file: config_file.clone(),
+            themes_dir: dir.path().join("themes"),
+            keymaps_dir: dir.path().join("keymaps"),
+            session_file: dir.path().join("state").join("session.json"),
+            logs_dir: dir.path().join("state").join("logs"),
+        };
+
+        paths.ensure_dirs().expect("dirs");
+        let loaded = load_config(&paths, Some(&config_file)).expect("load config");
+
+        assert!(!loaded.config.startup.show_welcome_message);
+        assert_eq!(
+            loaded.config.startup.welcome_message,
+            "Custom welcome message"
+        );
     }
 }

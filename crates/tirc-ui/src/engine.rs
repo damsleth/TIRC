@@ -241,6 +241,8 @@ pub struct UiEngine {
     nicklist: NicklistState,
     chat: ChatScrollState,
     regions: LayoutRegions,
+    show_welcome_message: bool,
+    welcome_message: String,
 }
 
 impl UiEngine {
@@ -254,6 +256,8 @@ impl UiEngine {
         active_theme: String,
         keymap_options: Vec<String>,
         active_keymap: String,
+        show_welcome_message: bool,
+        welcome_message: String,
     ) -> Self {
         let keymap_actions = flatten_keymap(&keymap);
 
@@ -279,6 +283,8 @@ impl UiEngine {
             nicklist: NicklistState::default(),
             chat: ChatScrollState::default(),
             regions: LayoutRegions::default(),
+            show_welcome_message,
+            welcome_message,
         }
     }
 
@@ -566,7 +572,21 @@ impl UiEngine {
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                // Show welcome message when no buffer is active
+                if self.show_welcome_message {
+                    vec![
+                        Line::from(""),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            &self.welcome_message,
+                            Style::default().fg(parse_color(&self.theme.palette.foreground)),
+                        )),
+                    ]
+                } else {
+                    Vec::new()
+                }
+            });
 
         let active_buffer_key = vm
             .active_buffer
