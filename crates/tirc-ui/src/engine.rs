@@ -14,7 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use tirc_config::{Keymap, Theme};
+use tirc_config::{Keymap, StartupConfig, Theme};
 use tirc_core::{AppViewModel, UiAction, UiEvent};
 
 use crate::{
@@ -155,6 +155,7 @@ struct SidebarState {
     tree: SidebarTree,
     collapse: HashMap<(String, SidebarSection), bool>,
     show: bool,
+    last_was_empty: bool,
 }
 
 impl Default for SidebarState {
@@ -164,6 +165,7 @@ impl Default for SidebarState {
             tree: SidebarTree::default(),
             collapse: HashMap::new(),
             show: true,
+            last_was_empty: false,
         }
     }
 }
@@ -175,6 +177,7 @@ struct NicklistState {
     filter: String,
     filtering: bool,
     show: bool,
+    last_was_empty: bool,
 }
 
 impl Default for NicklistState {
@@ -185,6 +188,7 @@ impl Default for NicklistState {
             filter: String::new(),
             filtering: false,
             show: true,
+            last_was_empty: false,
         }
     }
 }
@@ -241,6 +245,9 @@ pub struct UiEngine {
     nicklist: NicklistState,
     chat: ChatScrollState,
     regions: LayoutRegions,
+    startup_config: StartupConfig,
+    user_toggled_sidebar: bool,
+    user_toggled_nicklist: bool,
 }
 
 impl UiEngine {
@@ -254,8 +261,14 @@ impl UiEngine {
         active_theme: String,
         keymap_options: Vec<String>,
         active_keymap: String,
+        startup_config: StartupConfig,
     ) -> Self {
         let keymap_actions = flatten_keymap(&keymap);
+
+        // Determine initial sidebar visibility based on startup config
+        // At startup, we assume no buffers yet (they'll be loaded from session if any)
+        let initial_sidebar_show = !startup_config.hide_buffer_when_empty;
+        let initial_nicklist_show = !startup_config.hide_nicklist_when_empty;
 
         Self {
             theme,
@@ -275,10 +288,43 @@ impl UiEngine {
             last_draw: Instant::now(),
             idle_hz,
             caches: UiCaches::default(),
-            sidebar: SidebarState::default(),
-            nicklist: NicklistState::default(),
+            sidebar: SidebarState {
+                show: initial_sidebar_show,
+                last_was_empty: startup_config.hide_buffer_when_empty,
+                ..Default::default()
+            },
+            nicklist: NicklistState {
+                show: initial_nicklist_show,
+                last_was_empty: startup_config.hide_nicklist_when_empty,
+                ..Default::default()
+            },
             chat: ChatScrollState::default(),
             regions: LayoutRegions::default(),
+            startup_config,
+            user_toggled_sidebar: false,
+            user_toggled_nicklist: false,
+        }
+    }
+
+    /// Update sidebar visibility based on content if auto-hide is enabled and user hasn't toggled.
+    fn update_sidebar_visibility(&mut self, is_empty: bool) {
+        if !self.user_toggled_sidebar
+            && self.startup_config.hide_buffer_when_empty
+            && is_empty != self.sidebar.last_was_empty
+        {
+            self.sidebar.show = !is_empty;
+            self.sidebar.last_was_empty = is_empty;
+        }
+    }
+
+    /// Update nicklist visibility based on content if auto-hide is enabled and user hasn't toggled.
+    fn update_nicklist_visibility(&mut self, is_empty: bool) {
+        if !self.user_toggled_nicklist
+            && self.startup_config.hide_nicklist_when_empty
+            && is_empty != self.nicklist.last_was_empty
+        {
+            self.nicklist.show = !is_empty;
+            self.nicklist.last_was_empty = is_empty;
         }
     }
 
@@ -384,6 +430,25 @@ impl UiEngine {
             self.caches.last_buffer_count = buffer_count;
         }
 
+        // Build unified sidebar items early so we can determine visibility
+        let items = self.build_sidebar_items(vm);
+        self.sidebar.tree.rebuild(items);
+
+        // Update sidebar visibility based on content
+        let sidebar_is_empty = self.sidebar.tree.items.is_empty();
+        self.update_sidebar_visibility(sidebar_is_empty);
+
+        // Get nicklist for current buffer to determine nicklist visibility
+        let raw_nicks: Vec<String> = vm
+            .active_buffer
+            .as_ref()
+            .map(|buffer| buffer.nicklist.clone())
+            .unwrap_or_default();
+
+        // Update nicklist visibility based on content
+        let nicklist_is_empty = raw_nicks.is_empty();
+        self.update_nicklist_visibility(nicklist_is_empty);
+
         let area = frame.area();
         let root = Layout::default()
             .direction(Direction::Vertical)
@@ -428,10 +493,6 @@ impl UiEngine {
         self.regions.nicklist = right_area;
         self.regions.sidebar = left_area;
         self.regions.input = Some(root[2]);
-
-        // Build unified sidebar items
-        let items = self.build_sidebar_items(vm);
-        self.sidebar.tree.rebuild(items);
 
         // Clamp sidebar selection
         if self.sidebar.tree.items.is_empty() {
@@ -1265,10 +1326,12 @@ impl UiEngine {
             }
             UiAction::SidebarLeftToggle => {
                 self.sidebar.show = !self.sidebar.show;
+                self.user_toggled_sidebar = true;
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
             UiAction::SidebarRightToggle => {
                 self.nicklist.show = !self.nicklist.show;
+                self.user_toggled_nicklist = true;
                 vec![UiIntent::Event(UiEvent::Tick)]
             }
             // Forward other actions to the app layer

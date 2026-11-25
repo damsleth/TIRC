@@ -43,6 +43,8 @@ pub struct UiConfig {
     pub show_nicklist: bool,
     pub show_server_list: bool,
     pub max_scrollback_lines: usize,
+    #[serde(default)]
+    pub startup: StartupConfig,
 }
 
 impl Default for UiConfig {
@@ -52,8 +54,15 @@ impl Default for UiConfig {
             show_nicklist: true,
             show_server_list: true,
             max_scrollback_lines: 5_000,
+            startup: StartupConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StartupConfig {
+    pub hide_buffer_when_empty: bool,
+    pub hide_nicklist_when_empty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,5 +335,25 @@ mod tests {
 
         let err = load_config(&paths, Some(&config_file)).expect_err("should fail permissions");
         assert!(matches!(err, ConfigError::InsecurePermissions { .. }));
+    }
+
+    #[test]
+    fn startup_config_defaults() {
+        let config = AppConfig::default();
+        assert!(!config.ui.startup.hide_buffer_when_empty);
+        assert!(!config.ui.startup.hide_nicklist_when_empty);
+    }
+
+    #[test]
+    fn startup_config_serialization() {
+        let mut config = AppConfig::default();
+        config.ui.startup.hide_buffer_when_empty = true;
+        config.ui.startup.hide_nicklist_when_empty = true;
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        let deserialized: AppConfig = toml::from_str(&serialized).expect("deserialize");
+
+        assert!(deserialized.ui.startup.hide_buffer_when_empty);
+        assert!(deserialized.ui.startup.hide_nicklist_when_empty);
     }
 }

@@ -1,4 +1,5 @@
 # DEVLOG
+- (pending) feat(ui,config): add startup config for hiding empty sidebars
 - `4a191f1` fix: bound channel_list_cache to prevent memory exhaustion
 - `17bc3f2` fix: limit nick collision retries to prevent infinite loop
 - `0793015` refactor: replace magic action strings with UiAction enum
@@ -61,3 +62,47 @@ Implemented all 25 findings from QA_REPORT.md. Summary of changes:
 - `zeroize` (workspace) — credential zeroing
 - `futures` (tirc-app) — StreamExt for EventStream
 - crossterm `event-stream` feature — async terminal events
+
+## Sidebar Auto-Hide Feature (pending)
+
+### Feature
+Added configuration options to automatically hide sidebars when empty at startup:
+- `ui.startup.hide_buffer_when_empty` - hides left sidebar when no buffers exist
+- `ui.startup.hide_nicklist_when_empty` - hides right sidebar when no users in current channel
+
+### Implementation
+1. **Config Schema** (`tirc-config/src/schema.rs`)
+   - Added `StartupConfig` struct with two boolean fields
+   - Added to `UiConfig` with `#[serde(default)]` for backward compatibility
+   - Added tests for serialization/deserialization
+
+2. **UI Engine** (`tirc-ui/src/engine.rs`)
+   - Added `startup_config` field to store configuration
+   - Added `user_toggled_sidebar` and `user_toggled_nicklist` flags to track manual toggles
+   - Modified `UiEngine::new()` to accept `StartupConfig` and initialize visibility based on config
+   - Added auto-hide/show logic in `draw()` method:
+     - Builds sidebar items and checks if empty before layout calculation
+     - Checks nicklist content before layout calculation
+     - Only auto-manages visibility if user hasn't manually toggled
+   - Updated toggle handlers to set user toggle flags
+
+3. **App Integration** (`tirc-app/src/app.rs`)
+   - Pass `startup_config` to `UiEngine::new()`
+
+### Behavior
+- **When enabled (`hide_*_when_empty = true`)**:
+  - Sidebars start hidden if empty
+  - Automatically show when content appears (buffers/users)
+  - User manual toggle overrides auto-management permanently
+- **When disabled (default, `hide_*_when_empty = false`)**:
+  - Sidebars always shown (existing behavior)
+  - User can still manually toggle visibility
+
+### Tests
+- Config serialization/deserialization tests pass
+- All existing tests pass (58 tests total)
+- Logic manually verified for all scenarios
+
+### Follow-up
+- Could add option to reset user toggle flags on app restart
+- Could add command to re-enable auto-management after manual toggle

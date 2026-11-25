@@ -116,6 +116,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         runtime_config.ui.theme.clone(),
         keymap_options,
         runtime_config.keymap.active_map.clone(),
+        runtime_config.ui.startup.clone(),
     );
 
     let notifier = PlatformNotifier {
